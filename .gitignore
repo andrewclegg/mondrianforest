@@ -6,3 +6,5 @@ process_data/satimage/satimage*
 process_data/usps/usps*
 .env
 src/results/*
+.*
+

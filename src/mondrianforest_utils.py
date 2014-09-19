@@ -585,16 +585,19 @@ def compute_entropy(cnts, alpha=0.0):
     return entropy
 
 
-def precompute_minimal(data, settings):
+def precompute_minimal(n_classes, settings):
     param = empty()
     cache = {}
     assert settings.optype == 'class'
     if settings.optype == 'class':
         param.alpha = settings.alpha
-        param.alpha_per_class = float(param.alpha) / data['n_class']
-        cache['y_train_counts'] = hist_count(data['y_train'], range(data['n_class']))
-        cache['range_n_class'] = range(data['n_class'])
-        param.base_measure = (np.ones(data['n_class']) + 0.) / data['n_class']
+        param.alpha_per_class = float(param.alpha) / n_classes
+        #cache['y_train_counts'] = hist_count(data['y_train'], range(data['n_class']))
+        cache['y_train_counts'] = np.zeros((n_classes), dtype=int)
+        print 'y_train_counts'
+        print cache['y_train_counts']
+        cache['range_n_class'] = range(n_classes)
+        param.base_measure = (np.ones(n_classes) + 0.) / n_classes
         param.alpha_vec = param.base_measure * param.alpha
     return (param, cache)
 
