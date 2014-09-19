@@ -274,7 +274,7 @@ class mondrianTree(object):
             x_train = data['x_train'][self.train_ids[node_id], :]
             #ax.scatter(x_train[:, 0], x_train[:, 1], color='k', marker='x', s=10, zorder=2)
             color_y = 'rbk'
-            for y_ in range(data['n_class']):
+            for y_ in range(settings.n_classes):
                 idx = data['y_train'][self.train_ids[node_id]] == y_
                 ax.scatter(x_train[idx, 0], x_train[idx, 1], color=color_y[y_], marker='o', s=16, zorder=2)
         plt.draw()
@@ -457,11 +457,11 @@ class mondrianTree(object):
             if not node_id.is_leaf:
                 self.node_list.extend([node_id.left, node_id.right])
 
-    def predict_class(self, x_test, n_class, param, settings):
+    def predict_class(self, x_test, param, settings):
         """
         predict new label (for classification tasks)
         """
-        pred_prob = np.zeros((x_test.shape[0], n_class))
+        pred_prob = np.zeros((x_test.shape[0], settings.n_classes))
         prob_not_separated_yet = np.ones(x_test.shape[0])
         prob_separated = np.zeros(x_test.shape[0])
         node_list = [self.root]
@@ -836,7 +836,7 @@ def get_children_id(parent):
 
 def evaluate_predictions(p, x, y, data, param, settings):
     if settings.optype == 'class':
-        pred_prob = p.predict_class(x, data['n_class'], param, settings)
+        pred_prob = p.predict_class(x, param, settings)
         pred_all = {'pred_prob': pred_prob}
     else:
         pred_mean, pred_prob = p.predict_real(x, y, param, settings, settings)
@@ -846,7 +846,7 @@ def evaluate_predictions(p, x, y, data, param, settings):
 
 def evaluate_predictions_mf(mf, data, x, y, settings, param, weights, print_results=True):
     if settings.optype == 'class':
-        pred_prob_overall = np.zeros((x.shape[0], data['n_class']))
+        pred_prob_overall = np.zeros((x.shape[0], settings.n_classes))
     else:
         pred_prob_overall = np.zeros(x.shape[0])
         pred_mean_overall = np.zeros(x.shape[0])
@@ -918,7 +918,7 @@ def main():
     print 'n_train = %d, n_test = %d, n_dim = %d' %\
             (data['n_train'], data['n_test'], data['n_dim'])
     if settings.optype == 'class':
-        print 'n_class = %d' % (data['n_class'])
+        print 'n_class = %d' % (settings.n_classes)
     if settings.budget < 0:
         settings.budget_to_use = INF
     else:

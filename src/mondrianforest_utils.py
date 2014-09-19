@@ -142,6 +142,7 @@ def load_data(settings):
     assert(not data['is_sparse'])
     try:
         if settings.normalize_features == 1:
+            # FIXME shouldn't do this here, because of no-time-machines
             min_d = np.minimum(np.min(data['x_train'], 0), np.min(data['x_test'], 0))
             max_d = np.maximum(np.max(data['x_train'], 0), np.max(data['x_test'], 0))
             data['x_train'] -= min_d + 0.
@@ -206,7 +207,6 @@ def get_name_metric(settings):
 def load_toy_data():
     n_dim = 2
     n_train_pc = 4
-    n_class = 2
     n_train = n_train_pc * n_class
     n_test = n_train
     y_train = np.r_[np.ones(n_train_pc, dtype='int'), \
@@ -228,7 +228,7 @@ def load_toy_data():
         else:
             tmp = np.sign(np.random.rand() - 0.5) 
             x_test[i, :] += np.array([tmp, -tmp]) * mag
-    data = {'x_train': x_train, 'y_train': y_train, 'n_class': n_class, \
+    data = {'x_train': x_train, 'y_train': y_train, \
             'n_dim': n_dim, 'n_train': n_train, 'x_test': x_test, \
             'y_test': y_test, 'n_test': n_test, 'is_sparse': False}
     print data
@@ -237,7 +237,6 @@ def load_toy_data():
 
 def load_toy_mf_data():
     n_dim = 2
-    n_class = 3
 #    x_train = np.array([-1, -1, -2, -2, 1,1, 2,2, 3,3, 4,4, -1, 1, -2, 2, 2,-2, 3, -3])
 #    x_train.shape = (10, 2)
 #    x_test = np.array([0,0.5, -1,0.5, 10,10]) + 0.
@@ -283,7 +282,7 @@ def load_toy_mf_data():
 #        if np.any(np.abs(x_) > 7):
 #            y_test[i] = int(round(np.random.rand()))
 #    print 'checking x_test = %s' % x_test
-    data = {'x_train': x_train, 'y_train': y_train, 'n_class': n_class, \
+    data = {'x_train': x_train, 'y_train': y_train, \
             'n_dim': n_dim, 'n_train': n_train, 'x_test': x_test, \
             'y_test': y_test, 'n_test': n_test, 'is_sparse': False}
 #    print 'training data = %s' % np.column_stack((x_train, y_train))
@@ -293,7 +292,6 @@ def load_toy_mf_data():
 
 def load_halfmoons(dataset):
     n_dim = 2
-    n_class = 2
     if dataset == 'halfmoons':
         x_train = np.array([-3,0, -2,1, -1,2, 0,3, 1,2, 2,1, 3,0, -1.5,1.5, -0.5,0.5, 0.5,-0.5, 1.5,-1.5, 2.5,-0.5, 3.5,0.5, 4.5,1.5]) + 0.
         y_train = np.array([0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1], dtype='int')
@@ -336,7 +334,7 @@ def load_halfmoons(dataset):
     n_test = x_test.shape[0]
 #    print x_train, x_test, y_train, y_test
 #    print 'checking x_test = %s' % x_test
-    data = {'x_train': x_train, 'y_train': y_train, 'n_class': n_class, \
+    data = {'x_train': x_train, 'y_train': y_train, \
             'n_dim': n_dim, 'n_train': n_train, 'x_test': x_test, \
             'y_test': y_test, 'n_test': n_test, 'is_sparse': False}
     return data
@@ -539,8 +537,8 @@ def compute_dirichlet_normalizer_fast(cnt, cache):
     return op
 
 
-def evaluate_predictions(p, x, y, data, param):
-    (pred, pred_prob) = p.predict(x, data['n_class'], param.alpha)
+def evaluate_predictions(p, x, y, data, n_classes, param):
+    (pred, pred_prob) = p.predict(x, n_classes, param.alpha)
     (acc, log_prob) = compute_metrics(y, pred_prob)
     return (pred, pred_prob, acc, log_prob)
 
@@ -557,8 +555,8 @@ def compute_left_right_statistics(data, param, cache, train_ids, feat_id_chosen,
     cache_tmp = {}
     if settings.optype == 'class':
         range_n_class = cache['range_n_class']
-        cnt_left_chosen = np.bincount(data['y_train'][train_ids_left], minlength=data['n_class'])
-        cnt_right_chosen = np.bincount(data['y_train'][train_ids_right], minlength=data['n_class'])
+        cnt_left_chosen = np.bincount(data['y_train'][train_ids_left], minlength=settings.n_classes)
+        cnt_right_chosen = np.bincount(data['y_train'][train_ids_right], minlength=settings.n_classes)
         if not do_not_compute_loglik:
             loglik_left = compute_dirichlet_normalizer_fast(cnt_left_chosen, cache)
             loglik_right = compute_dirichlet_normalizer_fast(cnt_right_chosen, cache)
@@ -628,7 +626,7 @@ def update_posterior_node_incremental(tree, data, param, settings, cache, node_i
     y_train_new = data['y_train'][train_ids_new]
     if settings.optype == 'class':
         #tree.counts[node_id] += hist_count(y_train_new, cache['range_n_class'])
-        tree.counts[node_id] += np.bincount(y_train_new, minlength=data['n_class'])
+        tree.counts[node_id] += np.bincount(y_train_new, minlength=settings.n_classes)
         if not do_not_compute_loglik:
             tree.loglik[node_id] = compute_dirichlet_normalizer_fast(tree.counts[node_id], cache)
     else:
