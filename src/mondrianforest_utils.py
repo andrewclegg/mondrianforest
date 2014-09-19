@@ -32,6 +32,8 @@ def parser_add_common_options():
     parser = optparse.OptionParser()
     parser.add_option('--dataset', dest='dataset', default='toy',
             help='name of the dataset  [default: %default]')
+    parser.add_option('--n_classes', dest='n_classes', default=2, type=int,
+            help='number of classes in dataset [default: %default]')
     parser.add_option('--normalize_features', dest='normalize_features', default=0, type='int',
             help='do you want to normalize features in the range 0-1? (0=False, 1=True) [default: %default]')
     parser.add_option('--optype', dest='optype', default='class',
@@ -585,19 +587,18 @@ def compute_entropy(cnts, alpha=0.0):
     return entropy
 
 
-def precompute_minimal(n_classes, settings):
+def precompute_minimal(settings):
     param = empty()
     cache = {}
     assert settings.optype == 'class'
     if settings.optype == 'class':
         param.alpha = settings.alpha
-        param.alpha_per_class = float(param.alpha) / n_classes
-        #cache['y_train_counts'] = hist_count(data['y_train'], range(data['n_class']))
-        cache['y_train_counts'] = np.zeros((n_classes), dtype=int)
+        param.alpha_per_class = float(param.alpha) / settings.n_classes
+        cache['y_train_counts'] = np.zeros((settings.n_classes), dtype=int)
         print 'y_train_counts'
         print cache['y_train_counts']
-        cache['range_n_class'] = range(n_classes)
-        param.base_measure = (np.ones(n_classes) + 0.) / n_classes
+        cache['range_n_class'] = range(settings.n_classes)
+        param.base_measure = (np.ones(settings.n_classes) + 0.) / settings.n_classes
         param.alpha_vec = param.base_measure * param.alpha
     return (param, cache)
 

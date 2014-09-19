@@ -931,7 +931,7 @@ def main():
         data['y_test'] = data['y_test'][:2]
 
     # precomputation
-    param, cache = precompute_minimal(data['n_class'], settings)
+    param, cache = precompute_minimal(settings)
     time_init = time.clock() - time_0
 
     print '\nCreating Mondrian forest'
