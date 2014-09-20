@@ -32,7 +32,6 @@ def sample_multinomial(prob):
         raise TypeError
 
 
-@jit
 class MondrianNode(object):
 
     
@@ -51,7 +50,6 @@ class MondrianNode(object):
         self.split_point = None
         
     
-    @jit
     def update(self, data, labels):
         # Update bounding box and label counts
         self.min_d, self.max_d = get_colwise_min_max(data)
@@ -59,14 +57,12 @@ class MondrianNode(object):
         self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
         
 
-    @jit
     def apply_split(self, data):
         # Apply this node's existing splitting criterion to some data
         # and return a boolean index (True==goes left, False==goes right)
         return data[:, self.split_dim] <= self.split_point
     
     
-    @jit
     def is_leaf(self):
         if self.left is None:
             assert self.right is None
@@ -76,12 +72,10 @@ class MondrianNode(object):
             return False
 
         
-    @jit
     def is_pure(self):
         return np.count_nonzero(self.label_counts) < 2
 
 
-@jit
 class MondrianTree(object):
     
     
@@ -91,12 +85,10 @@ class MondrianTree(object):
         self.root = MondrianNode(n_dims, n_labels, None, budget)
         
     
-    @jit
     def extend(self, data, labels):
         self._extend_node(self.root, data, labels)
     
     
-    @jit
     def _extend_node(self, node, data, labels):
         
         min_d, max_d = get_colwise_min_max(data)
@@ -138,7 +130,6 @@ class MondrianTree(object):
                 self._extend_node(node.right, data[~goes_left], labels[~goes_left])
 
 
-    @jit
     def _split_node(self, node, data, labels, split_cost, min_d, max_d,
                     additional_extent_lower, additional_extent_upper):
         
@@ -216,7 +207,6 @@ class MondrianTree(object):
         # TODO ensure the new node behaves correctly (i.e. gets grown when it needs to)
 
 
-    @jit
     def _grow(self, node):
         
         assert node.is_leaf()
@@ -239,7 +229,6 @@ class MondrianTree(object):
             # No point growing these as they start off empty (unlike in original paper)
 
 
-    @jit
     def predict(self, row):
         # Dumb-ass scoring, just for now
         node = self.root
@@ -255,18 +244,15 @@ class MondrianTree(object):
         return last_counts_seen / last_counts_seen.sum()
 
 
-@jit
 class MondrianForest(object):
     
     def __init__(self, n_trees, n_dims, n_labels, budget):
         self.trees = [MondrianTree(n_dims, n_labels, budget) for k in range(n_trees)]
     
-    @jit
     def update(self, data, labels):
         for tree in self.trees:
             tree.extend(data, labels)
     
-    @jit
     def predict(self, row, aggregate):
         results = [tree.predict(row) for tree in self.trees]
         stacked = np.vstack(results)
