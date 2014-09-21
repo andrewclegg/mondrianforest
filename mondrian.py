@@ -1,5 +1,5 @@
 import random
-
+import os
 import numpy as np
 
 
@@ -7,7 +7,6 @@ def init_tree(n_dims, n_labels, budget, global_name):
     """
     Helper function for remote engines.
     """
-    from mondrian import MondrianTree
     globals()[global_name] = MondrianTree(n_dims, n_labels, budget)
 
 
@@ -322,6 +321,7 @@ class ParallelMondrianForest(object):
     def __init__(self, ipy_view, n_dims, n_labels, budget):
         self._view = ipy_view
         self._remote_name = 'mondrian_worker'
+        self._view.run(os.path.realpath(__file__)) # Run this file!
         self._view.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
 
 
