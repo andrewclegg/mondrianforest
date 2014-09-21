@@ -322,7 +322,7 @@ class ParallelMondrianForest(object):
     def __init__(self, ipy_view, n_dims, n_labels, budget):
         self._view = ipy_view
         self._remote_name = 'mondrian_worker'
-        dview.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
+        self._view.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
 
 
     def update(self, data, labels):
