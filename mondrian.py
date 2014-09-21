@@ -319,16 +319,17 @@ class MondrianForest(object):
 class ParallelMondrianForest(object):
 
 
-    def __init__(self, view, n_dims, n_labels, budget):
+    def __init__(self, ipy_view, n_dims, n_labels, budget):
+        self._view = ipy_view
         self._remote_name = 'mondrian_worker'
         dview.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
 
 
     def update(self, data, labels):
-        dview.apply_sync(extend, data, labels, self._remote_name)
+        self._view.apply_sync(extend, data, labels, self._remote_name)
 
 
     def predict(self, row, aggregate):
-        results = dview.map_sync(predict, row, self._remote_name)
+        results = self._view.map_sync(predict, row, self._remote_name)
         return combine_predictions(aggregate)
 
