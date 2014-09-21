@@ -60,19 +60,19 @@ def sample_multinomial_scores(scores):
     return k
 
 
-@jit('f8(f8[:])')
-def sample_multinomial(prob):
-    return int(np.where(np.random.multinomial(1, prob, size=1)[0]==1)[0])
+@jit('f8[:](f8[:])')
+def normalize(vec):
+    return vec / vec.sum()
 
 
 class MondrianNode(object):
 
     
     def __init__(self, n_dims, n_labels, parent, budget):
-        self.min_d = np.zeros(n_dims)
-        self.max_d = np.zeros(n_dims)
-        self.range_d = np.zeros(n_dims)
-        self.sum_range_d = np.zeros(n_dims)
+        self.min_d = np.empty(n_dims)
+        self.max_d = np.empty(n_dims)
+        self.range_d = np.empty(n_dims)
+        self.sum_range_d = 0
         self.label_counts = np.zeros(n_labels)
         self.budget = budget
         self.max_split_cost = 0
@@ -142,9 +142,9 @@ class MondrianTree(object):
         
         min_d = get_colwise_min(data)
         max_d = get_colwise_max(data)
-        additional_extent_lower = np.maximum(0, node.min_d - min_d)
-        additional_extent_upper = np.maximum(0, max_d - node.max_d)
-        expo_parameter = additional_extent_lower.sum() + additional_extent_upper.sum()
+        additional_extent_lower = np.fmax(0, node.min_d - min_d)
+        additional_extent_upper = np.fmax(0, max_d - node.max_d)
+        expo_parameter = np.sum([additional_extent_lower, additional_extent_upper])
         
         is_leaf = node.is_leaf()
         if expo_parameter == 0 or is_leaf:
@@ -192,8 +192,8 @@ class MondrianTree(object):
         
         # Create new parent node which is a near-copy of the one that's splitting
         new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, budget=node.budget)
-        new_parent.min_d = np.minimum(min_d, node.min_d)
-        new_parent.max_d = np.maximum(max_d, node.max_d)
+        new_parent.min_d = np.fmin(min_d, node.min_d)
+        new_parent.max_d = np.fmax(max_d, node.max_d)
         new_parent.range_d = get_data_range(new_parent.min_d, new_parent.max_d)
         new_parent.sum_range_d = np.sum(new_parent.range_d)
         new_parent.label_counts = node.label_counts
@@ -250,7 +250,7 @@ class MondrianTree(object):
         
         # Update budgets and costs associated with the nodes
         node.budget = new_budget
-        node.max_split_cost -= split_cost
+        node.max_split_cost = node.max_split_cost - split_cost
         new_parent.max_split_cost = split_cost
         
         # Update the bounding boxes and label counts for the left and right sides of the new split
@@ -302,7 +302,7 @@ class MondrianTree(object):
         if np.allclose(last_counts_seen, 0):
             return np.zeros_like(last_counts_seen)
         # L1 normalize
-        return last_counts_seen / last_counts_seen.sum()
+        return normalize(last_counts_seen)
 
 
     def predict_from(self, row_var, out_var):
