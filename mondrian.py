@@ -2,28 +2,55 @@ import random
 
 import numpy as np
 
-from numba import jit
+
+def init_tree(n_dims, n_labels, budget, global_name):
+    """
+    Helper function for remote engines.
+    """
+    from mondrian import MondrianTree
+    globals()[global_name] = MondrianTree(n_dims, n_labels, budget)
+
+
+def extend(data, labels, global_name):
+    """
+    Helper function for remote engines.
+    """
+    globals()[global_name].extend(data, labels)
+
+
+def predict(row, global_name):
+    """
+    Helper function for remote engines.
+    """
+    return globals()[global_name].predict(row)
+
+
+def combine_predictions(results, aggregate=True):
+    stacked = np.vstack(results)
+    if aggregate:
+        return stacked.sum(axis=0) / stacked.sum()
+    else:
+        return stacked
 
 
 # Candidates for memoization?
 
-@jit
 def get_colwise_min_max(data):
     return (data.min(axis=0), data.max(axis=0))
 
-@jit
+
 def get_data_range(min_d, max_d):
     range_d = max_d - min_d
     return (range_d, range_d.sum())
 
-@jit
+
 def sample_multinomial_scores(scores):
     scores_cumsum = np.cumsum(scores)
     s = scores_cumsum[-1] * np.random.rand(1)
     k = int(np.sum(s > scores_cumsum))
     return k
 
-@jit
+
 def sample_multinomial(prob):
     try:
         k = int(np.where(np.random.multinomial(1, prob, size=1)[0]==1)[0])
@@ -86,6 +113,19 @@ class MondrianTree(object):
         
     
     def extend(self, data, labels):
+        self._extend_node(self.root, data, labels)
+
+
+    def extend_from(self, data_var, labels_var):
+        """
+        A convenience function for parallel/remote operation.
+
+        data_var and labels_var contain the names of variables in the
+        global namespace, where this function will look for the data
+        and labels respectively. Otherwise, identical to extend.
+        """
+        data = globals()[data_var]
+        labels = globals()[labels_var]
         self._extend_node(self.root, data, labels)
     
     
@@ -244,24 +284,51 @@ class MondrianTree(object):
         return last_counts_seen / last_counts_seen.sum()
 
 
+    def predict_from(self, row_var, out_var):
+        """
+        A convenience function for parallel/remote operation.
+
+        row_var contains the name of a variable in the global
+        namespace, where this function will look for a row
+        vector to classify. It will put the resulting vector
+        of class scores into another global variable, whose
+        name is supplied in the out_var param. Otherwise,
+        identical to predict.
+        """
+        row = globals()[row_var]
+        globals()[out_var] = self.predict(row)
+    
+    
 class MondrianForest(object):
+
     
     def __init__(self, n_trees, n_dims, n_labels, budget):
         self.trees = [MondrianTree(n_dims, n_labels, budget) for k in range(n_trees)]
     
+
     def update(self, data, labels):
         for tree in self.trees:
             tree.extend(data, labels)
-    
+
+
     def predict(self, row, aggregate):
         results = [tree.predict(row) for tree in self.trees]
-        stacked = np.vstack(results)
-        if aggregate:
-            return stacked.sum(axis=0) / stacked.sum()
-        else:
-            return stacked
+        return combine_predictions(results, aggregate)
 
-    # No longer needed?
-    def _repeat(self, arg):
-        return (arg for i in range(len(self.trees)))
+
+class ParallelMondrianForest(object):
+
+
+    def __init__(self, view, n_dims, n_labels, budget):
+        self._remote_name = 'mondrian_worker'
+        dview.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
+
+
+    def update(self, data, labels):
+        dview.apply_sync(extend, data, labels, self._remote_name)
+
+
+    def predict(self, row, aggregate):
+        results = dview.map_sync(predict, row, self._remote_name)
+        return combine_predictions(aggregate)
 
