@@ -3,11 +3,14 @@ import os
 import numpy as np
 
 
-def init_tree(n_dims, n_labels, budget, global_name):
+def init_tree(n_dims, n_labels, budget, lib_path, global_name):
     """
     Helper function for remote engines.
     """
-    globals()[global_name] = MondrianTree(n_dims, n_labels, budget)
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader('mondrian', lib_path)
+    mondrian = loader.load_module()
+    globals()[global_name] = mondrian.MondrianTree(n_dims, n_labels, budget)
 
 
 def extend(data, labels, global_name):
@@ -21,7 +24,9 @@ def predict(row, global_name):
     """
     Helper function for remote engines.
     """
-    return globals()[global_name].predict(row)
+    tree = globals()[global_name]
+    pred = tree.predict(row)
+    return pred
 
 
 def combine_predictions(results, aggregate=True):
@@ -33,6 +38,7 @@ def combine_predictions(results, aggregate=True):
 
 
 # Candidates for memoization?
+
 
 def get_colwise_min_max(data):
     return (data.min(axis=0), data.max(axis=0))
@@ -108,6 +114,7 @@ class MondrianTree(object):
     def __init__(self, n_dims, n_labels, budget):
         self.n_dims = n_dims
         self.n_labels = n_labels
+        self.starting_budget = budget
         self.root = MondrianNode(n_dims, n_labels, None, budget)
         
     
@@ -164,7 +171,7 @@ class MondrianTree(object):
             # whole process with node's children
             goes_left = node.apply_split(data)
             if sum(goes_left):
-                self._extend_node(node.left, data[goes_left], labels[goes_left])
+                self._extend_node(node.left, data[goes_left], labels[goes_left], )
             if sum(~goes_left):
                 self._extend_node(node.right, data[~goes_left], labels[~goes_left])
 
@@ -263,8 +270,8 @@ class MondrianTree(object):
             node.split_point = random.uniform(node.min_d[node.split_dim], node.max_d[node.split_dim])
             
             # TODO use the default budget here, or inherit from parent? Paper says default
-            node.left = MondrianNode(self.n_dims, self.n_labels, node)
-            node.right = MondrianNode(self.n_dims, self.n_labels, node)
+            node.left = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget)
+            node.right = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget)
             # No point growing these as they start off empty (unlike in original paper)
 
 
@@ -321,8 +328,7 @@ class ParallelMondrianForest(object):
     def __init__(self, ipy_view, n_dims, n_labels, budget):
         self._view = ipy_view
         self._remote_name = 'mondrian_worker'
-        self._view.run(os.path.realpath(__file__)) # Run this file!
-        self._view.apply_sync(init_tree, n_dims, n_labels, budget, self._remote_name)
+        self._view.apply_sync(init_tree, n_dims, n_labels, budget, os.path.realpath(__file__), self._remote_name)
 
 
     def update(self, data, labels):
@@ -330,6 +336,6 @@ class ParallelMondrianForest(object):
 
 
     def predict(self, row, aggregate):
-        results = self._view.map_sync(predict, row, self._remote_name)
-        return combine_predictions(aggregate)
+        results = self._view.apply_sync(predict, row, self._remote_name)
+        return combine_predictions(results, aggregate)
 
