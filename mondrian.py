@@ -1,7 +1,7 @@
 import random
 import os
 import numpy as np
-
+from numba import jit, njit
 
 def init_tree(n_dims, n_labels, budget, lib_path, global_name):
     """
@@ -37,18 +37,22 @@ def combine_predictions(results, aggregate=True):
         return stacked
 
 
-# Candidates for memoization?
+@jit('f8[:](f8[:,:])')
+def get_colwise_min(data):
+    return np.amin(data, axis=0)
 
 
-def get_colwise_min_max(data):
-    return (data.min(axis=0), data.max(axis=0))
+@jit('f8[:](f8[:,:])')
+def get_colwise_max(data):
+    return np.amax(data, axis=0)
 
 
+@jit('f8[:](f8[:], f8[:])')
 def get_data_range(min_d, max_d):
-    range_d = max_d - min_d
-    return (range_d, range_d.sum())
+    return max_d - min_d
 
 
+@jit('f8(f8[:])')
 def sample_multinomial_scores(scores):
     scores_cumsum = np.cumsum(scores)
     s = scores_cumsum[-1] * np.random.rand(1)
@@ -56,12 +60,9 @@ def sample_multinomial_scores(scores):
     return k
 
 
+@jit('f8(f8[:])')
 def sample_multinomial(prob):
-    try:
-        k = int(np.where(np.random.multinomial(1, prob, size=1)[0]==1)[0])
-    except TypeError:
-        print('problem in sample_multinomial: prob = ', prob)
-        raise TypeError
+    return int(np.where(np.random.multinomial(1, prob, size=1)[0]==1)[0])
 
 
 class MondrianNode(object):
@@ -84,8 +85,10 @@ class MondrianNode(object):
     
     def update(self, data, labels):
         # Update bounding box and label counts
-        self.min_d, self.max_d = get_colwise_min_max(data)
-        self.range_d, self.sum_range_d = get_data_range(self.min_d, self.max_d)
+        self.min_d = get_colwise_min(data)
+        self.max_d = get_colwise_max(data)
+        self.range_d = get_data_range(self.min_d, self.max_d)
+        self.sum_range_d = np.sum(self.range_d)
         self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
         
 
@@ -137,7 +140,8 @@ class MondrianTree(object):
     
     def _extend_node(self, node, data, labels):
         
-        min_d, max_d = get_colwise_min_max(data)
+        min_d = get_colwise_min(data)
+        max_d = get_colwise_max(data)
         additional_extent_lower = np.maximum(0, node.min_d - min_d)
         additional_extent_upper = np.maximum(0, max_d - node.max_d)
         expo_parameter = additional_extent_lower.sum() + additional_extent_upper.sum()
@@ -170,10 +174,15 @@ class MondrianTree(object):
             # Split the data into left portion and right portion, and repeat
             # whole process with node's children
             goes_left = node.apply_split(data)
-            if sum(goes_left):
-                self._extend_node(node.left, data[goes_left], labels[goes_left], )
-            if sum(~goes_left):
-                self._extend_node(node.right, data[~goes_left], labels[~goes_left])
+            if np.any(goes_left):
+                l_data = np.compress(goes_left, data, axis=0)
+                l_labels = np.compress(goes_left, labels)
+                self._extend_node(node.left, l_data, l_labels)
+            goes_right = ~goes_left
+            if np.any(goes_right):
+                r_data = np.compress(goes_right, data, axis=0)
+                r_labels = np.compress(goes_right, labels)
+                self._extend_node(node.right, r_data, r_labels)
 
 
     def _split_node(self, node, data, labels, split_cost, min_d, max_d,
@@ -185,7 +194,8 @@ class MondrianTree(object):
         new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, budget=node.budget)
         new_parent.min_d = np.minimum(min_d, node.min_d)
         new_parent.max_d = np.maximum(max_d, node.max_d)
-        new_parent.range_d, new_parent.sum_range_d = get_data_range(new_parent.min_d, new_parent.max_d)
+        new_parent.range_d = get_data_range(new_parent.min_d, new_parent.max_d)
+        new_parent.sum_range_d = np.sum(new_parent.range_d)
         new_parent.label_counts = node.label_counts
         
         # Pick a random dimension to split on
@@ -245,10 +255,15 @@ class MondrianTree(object):
         
         # Update the bounding boxes and label counts for the left and right sides of the new split
         # (the new node will be grown automatically when needed, filling in max_split_cost)
-        if sum(data_for_original) > 0:
-            self._extend_node(node.left, data[data_for_original], labels[data_for_original])
-        if sum(~data_for_original) > 0:
-            self._extend_node(node.right, data[~data_for_original], labels[~data_for_original])
+        if np.any(data_for_original):
+            l_data = np.compress(data_for_original, data, axis=0)
+            l_labels = np.compress(data_for_original, labels)
+            self._extend_node(node.left, l_data, l_labels)
+        data_for_new = ~data_for_original
+        if np.any(data_for_new):
+            r_data = np.compress(data_for_new, data, axis=0)
+            r_labels = np.compress(data_for_new, labels)
+            self._extend_node(node.right, r_data, r_labels)
         
         # TODO ensure the new node behaves correctly (i.e. gets grown when it needs to)
 
