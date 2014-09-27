@@ -3,6 +3,7 @@ import os
 import numpy as np
 
 from collections import deque
+
 from numba import jit, njit
 
 
@@ -36,21 +37,28 @@ def extend(data, labels, global_name):
     globals()[global_name].extend(data, labels)
 
 
-def predict(row, global_name):
+def predict(x, global_name):
     """
     Helper function for remote engines.
     """
     tree = globals()[global_name]
-    pred = tree.predict(row)
+    pred = tree.predict(x)
     return pred
 
 
-def combine_predictions(results, aggregate=True):
-    stacked = np.vstack(results)
-    if aggregate:
-        return stacked.sum(axis=0) / stacked.sum()
-    else:
-        return stacked
+def combine_predictions(results):
+    """
+    Helper function for combining predictions from multiple trees.
+
+    The results param is a list of numpy arrays, one from each tree.
+    Each one must have one row per instance under test, and one column per class.
+    Each cell is the probability of that instance belonging to that class.
+
+    The output has the same shape as one of these input arrays. The class probabilities
+    for each instance are summed across all the input arrays, and renormalized.
+    """
+    summed = np.add.reduce(results)
+    return normalize(summed)
 
 
 @jit('f8[:](f8[:,:])')
@@ -77,8 +85,12 @@ def sample_multinomial_scores(scores):
 
 
 @jit('f8[:](f8[:])')
-def normalize(vec):
-    return vec / vec.sum()
+def normalize(array):
+    if array.ndim == 1:
+        return array / array.sum()
+    else:
+        row_totals = array.sum(axis=1)[:, np.newaxis]
+        return array / row_totals
 
 
 class MondrianNode(object):
@@ -112,9 +124,10 @@ class MondrianNode(object):
         
 
     def apply_split(self, data):
-        # Apply this node's existing splitting criterion to some data
+        # Apply this node's existing splitting criterion to some data (vector or array)
         # and return a boolean index (True==goes left, False==goes right)
-        return data[:, self.split_dim] <= self.split_point
+        data_array = np.atleast_2d(data)
+        return data_array[:, self.split_dim] <= self.split_point
     
     
     def is_leaf(self):
@@ -146,24 +159,37 @@ class SimpleScorer(object):
         pass
 
 
-    def predict(self, row):
+    def _predict(self, vector):
 
         node = self._root
         last_counts_seen = node.label_counts
         while node.label_counts.sum() > 0 and not node.is_leaf():
             last_counts_seen = node.label_counts
-            left = node.apply_split(row)
+            left = node.apply_split(vector)
             node = node.left if left else node.right
 
         # FIXME why do we sometimes get tiny floats in here, when they should be just counts (ints)?
         if np.allclose(last_counts_seen, 0):
             return np.zeros_like(last_counts_seen)
+        else:
+            # L1 normalize
+            return normalize(last_counts_seen)
 
-        # L1 normalize
-        return normalize(last_counts_seen)
+
+    def predict(self, x):
+
+        x_array = np.atleast_2d(x)
+        return np.apply_along_axis(self._predict, 1, x_array)
 
 
 class NSPScorer(object):
+
+
+    DISCOUNT_PARAM = 10 # TODO un-hard-code me
+
+
+    def _discount(self, node):
+        return np.expm1(-self.DISCOUNT_PARAM * node.max_split_cost)
 
 
     def on_create(self, leaf_node):
@@ -171,15 +197,22 @@ class NSPScorer(object):
         if not leaf_node.is_leaf():
             raise ValueError('on_create called for non-leaf node')
 
-        if not hasattr(self, '_n_labels'):
+        if not hasattr(self, '_pseudocounts'):
             self._tables = {}
             self._pseudocounts = {}
             self._posteriors = {}
-            self._n_labels = leaf_node.n_labels
-            self._prior = np.ones(self._n_labels) / self._n_labels # Uniform prior
+            self._prior = normalize(np.ones_like(leaf_node.label_counts)) # Uniform prior
 
-        self._tables[leaf_node] = np.zeros(self._n_labels)
-        self._pseudocounts[leaf_node] = np.zeros(self._n_labels)
+        self._tables[leaf_node] = np.zeros_like(self._prior)
+
+        if leaf_node.parent is None:
+            if hasattr(self, '_root'):
+                raise ValueError('on_create called with a root node twice')
+            self._root = leaf_node
+
+        # For leaf nodes, pseudocounts are actually real counts -- these are stored
+        # by the MondrianNode as they're used for other purposes too
+        self._pseudocounts[leaf_node] = leaf_node.label_counts
 
 
     def on_update(self, leaf_node, labels):
@@ -191,35 +224,38 @@ class NSPScorer(object):
         pc = self._pseudocounts
         t = self._tables
 
-        # First, update all the class pseudocounts, from this node up
+        # First, update all the class pseudocounts on ancestors of this node
         # TODO optimize this
         for label in labels:
-            pc[node][label] += 1
 
             while True:
                 if t[node][label] == 1:
                     break
                 
-                if not is_leaf(node):
-                    pc[node][label] = t[node.left][label] + t[node.right][label]
+                if not node.is_leaf():
+                    # Kneser-Ney approximation, extended to included
+                    # data points we've left attached to internal nodes
+                    pc[node][label] = t[node.left][label] + t[node.right][label] + min(node.label_counts, 1)
 
                 t[node][label] = min(pc[node][label], 1)
 
-                if node.parent is None:
-                    root = node
+                if node == self._root:
                     break
                 node = node.parent
 
         # Then, update the posterior probabilities, from the root down
-        todo = deque([root])
+        # TODO rewrite this using a generator (i.e. yield)
+        # TODO move this into an on_batch_complete method, so we don't do it on EVERY leaf node change
+        todo = deque([self._root])
         while todo:
             next_node = todo.pop()
-            if next_node == root:
+
+            if next_node == self._root:
                 prior = self._prior
             else:
                 prior = self._posteriors[next_node.parent]
-            d = self._discounts[node]
-            # TODO this doesn't take into account the *real* counts where we've left data in internal nodes
+
+            d = self._discount(node)
             self._posteriors[node] = (pc[node] - (d * t[node]) + (d * t[node].sum() * prior)) / pc[node].sum()
             if node.left:
                 todo.append(node.left)
@@ -227,11 +263,87 @@ class NSPScorer(object):
                 todo.append(node.right)
 
 
-    def predict(self, row):
-        pass # TODO
+    def predict(self, x_test):
+        """
+        predict new label (for classification tasks)
+        """
+        pred_prob = np.zeros((x_test.shape[0], len(self._prior)))
+        prob_not_separated_yet = np.ones(x_test.shape[0])
+        prob_separated = np.zeros(x_test.shape[0])
+        d_idx_test = {self._root: np.arange(x_test.shape[0])}
 
+        todo = deque([self._root])
+        while todo:
 
-# TODO add _discounts
+            node = todo.pop()
+            idx_test = d_idx_test[node]
+            if len(idx_test) == 0:
+                continue
+
+            if node == self._root:
+                print('Inspecting root node')
+            elif node.is_leaf():
+                print('Inspecting root node')
+            else:
+                print('Inspecting internal node')
+
+            print(node)
+            print('Prior:', self._prior if node == self._root else self._posteriors[node.parent])
+            print('Class counts:', node.label_counts)
+            print('Pseudocounts:', self._pseudocounts[node])
+            print('Tables:', self._tables[node])
+            print('Posterior:', self._posteriors[node])
+
+            x = x_test[idx_test, :]
+            distance_lower = np.fmax(0, node.min_d - x).sum(1)
+            distance_upper = np.fmax(0, x - node.max_d).sum(1)
+            expo_parameter = distance_lower + distance_upper
+            prob_not_separated_now = np.expm1(-expo_parameter * node.max_split_cost)
+            prob_separated_now = 1 - prob_not_separated_now
+
+            if np.isinf(node.max_split_cost):
+                idx_zero = expo_parameter == 0          # rare scenario where test point overlaps exactly with a training data point
+                prob_not_separated_now[idx_zero] = 1   # to prevent nan in computation above when test point overlaps with training data point
+                prob_separated_now[idx_zero] = 0
+
+            # predictions for idx_test_zero
+            # data dependent discounting (depending on how far test data point is from the mondrian block)
+            idx_non_zero = expo_parameter > 0
+            idx_test_non_zero = idx_test[idx_non_zero]
+            expo_parameter_non_zero = expo_parameter[idx_non_zero]
+            base = self._prior if node == self._root else self._posteriors[node.parent]
+
+            if np.any(idx_non_zero):
+                num_tables_k = self._tables[node]
+                num_tables = num_tables_k.sum()
+                num_customers = self._pseudocounts[node].sum()
+                # expected discount (averaging over time of cut which is a truncated exponential)
+                discount = (expo_parameter_non_zero / (expo_parameter_non_zero + self.DISCOUNT_PARAM)) \
+                                * (-np.expm1(-(expo_parameter_non_zero + self.DISCOUNT_PARAM) * node.max_split_cost)) \
+                                / (-np.expm1(-expo_parameter_non_zero * node.max_split_cost))
+                discount_per_num_customers = discount / num_customers
+                pred_prob_tmp = num_tables * discount_per_num_customers[:, np.newaxis] * base \
+                                + self._pseudocounts[node] / num_customers - discount_per_num_customers[:, np.newaxis] * num_tables_k
+                pred_prob[idx_test_non_zero, :] += prob_separated_now[idx_non_zero][:, np.newaxis] \
+                                                    * prob_not_separated_yet[idx_test_non_zero][:, np.newaxis] * pred_prob_tmp
+                prob_not_separated_yet[idx_test] *= prob_not_separated_now
+
+            # predictions for idx_test_zero
+            if np.isinf(node.max_split_cost) and np.any(idx_zero):
+                idx_test_zero = idx_test[idx_zero]
+                pred_prob_node = self._posteriors(node)
+                pred_prob[idx_test_zero, :] += prob_not_separated_yet[idx_test_zero][:, np.newaxis] * pred_prob_node
+
+            # try:
+            if node.split_point is not None:
+                cond = x[:, node.split_dim] <= node.split_point
+                d_idx_test[node.left], d_idx_test[node.right] = idx_test[cond], idx_test[~cond]
+                todo.append(node.left)
+                todo.append(node.right)
+            # except KeyError:
+            #     pass
+
+        return pred_prob
 
 
 class MondrianTree(object):
@@ -401,8 +513,8 @@ class MondrianTree(object):
             # No point growing these as they start off empty (unlike in original paper)
 
 
-    def predict(self, row):
-        return self._scorer.predict(row)
+    def predict(self, x):
+        return self._scorer.predict(x)
 
 
 class MondrianForest(object):
@@ -417,9 +529,9 @@ class MondrianForest(object):
             tree.extend(data, labels)
 
 
-    def predict(self, row, aggregate):
-        results = [tree.predict(row) for tree in self.trees]
-        return combine_predictions(results, aggregate)
+    def predict(self, x):
+        results = [tree.predict(x) for tree in self.trees]
+        return combine_predictions(results)
 
 
 class ParallelMondrianForest(object):
@@ -435,7 +547,7 @@ class ParallelMondrianForest(object):
         self._view.apply_sync(extend, data, labels, self._remote_name)
 
 
-    def predict(self, row, aggregate):
-        results = self._view.apply_sync(predict, row, self._remote_name)
-        return combine_predictions(results, aggregate)
+    def predict(self, x):
+        results = self._view.apply_sync(predict, x, self._remote_name)
+        return combine_predictions(results)
 
