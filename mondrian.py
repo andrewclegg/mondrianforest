@@ -3,14 +3,30 @@ import os
 import numpy as np
 from numba import jit, njit
 
-def init_tree(n_dims, n_labels, budget, lib_path, global_name):
+
+def scorer(name, tree):
+    """
+    Initialize a scorer of the specified type (currently 'simple')
+    for the supplied tree, and return it.
+    """
+    if name == 'simple':
+        scorer = SimpleScorer()
+#    elif name == 'nsp':
+#        scorer = NSPScorer()
+    else:
+        raise ValueError('Unknown scorer ' + name)
+    scorer.attach(tree)
+    return scorer
+
+
+def init_tree(n_dims, n_labels, budget, scoring, lib_path, global_name):
     """
     Helper function for remote engines.
     """
     import importlib.machinery
     loader = importlib.machinery.SourceFileLoader('mondrian', lib_path)
     mondrian = loader.load_module()
-    globals()[global_name] = mondrian.MondrianTree(n_dims, n_labels, budget)
+    globals()[global_name] = mondrian.MondrianTree(n_dims, n_labels, budget, scoring)
 
 
 def extend(data, labels, global_name):
@@ -90,6 +106,8 @@ class MondrianNode(object):
         self.range_d = get_data_range(self.min_d, self.max_d)
         self.sum_range_d = np.sum(self.range_d)
         self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
+        # To do prediction like the paper describes, we'd
+        # need to propagate label counts upwards from here
         
 
     def apply_split(self, data):
@@ -111,33 +129,83 @@ class MondrianNode(object):
         return np.count_nonzero(self.label_counts) < 2
 
 
+class SimpleScorer(object):
+
+
+    def attach(self, root_node):
+        self._root = root_node
+
+
+    def on_update(self, leaf_node, label):
+        # TODO can we do some clever caching so we do less calculation during prediction?
+        pass
+
+
+    def predict(self, row):
+        node = self._root
+        last_counts_seen = node.label_counts
+        while node.label_counts.sum() > 0 and not node.is_leaf():
+            last_counts_seen = node.label_counts
+            left = node.apply_split(row)
+            node = node.left if left else node.right
+        # FIXME why do we sometimes get tiny floats in here, when they should be just counts (ints)?
+        if np.allclose(last_counts_seen, 0):
+            return np.zeros_like(last_counts_seen)
+        # L1 normalize
+        return normalize(last_counts_seen)
+
+
+class NSPScorer(object): # TODO on_split or something?
+
+
+    def attach(self, root_node):
+        if not root_node.is_leaf():
+            raise ValueError('Attach the scorer object to a tree before adding any data to it')
+        self._root = root_node
+        self._n_labels = root_node.n_labels
+        self._tables = {root_node: np.zeros(self._n_labels)}
+        self._pseudocounts = {root_node: np.zeros(self._n_labels)}
+
+
+    def on_update(self, leaf_node, label):
+        if not leaf_node.is_leaf():
+            raise ValueError('NSPScorer only supports on_update for leaf nodes')
+
+        node = leaf_node
+        pc = self._pseudocounts
+        t = self._tables
+        pc[node][label] += 1
+
+        while True:
+            if t[node][label] == 1:
+                return
+            
+            if not is_leaf(node):
+                pc[node][label] = t[node.left][label] + t[node.right][label]
+
+            t[node][label] = min(pc[node][label], 1)
+
+            if node == self._root:
+                return
+            node = node.parent
+
+
+
 class MondrianTree(object):
     
     
-    def __init__(self, n_dims, n_labels, budget):
+    def __init__(self, n_dims, n_labels, budget, scoring):
         self.n_dims = n_dims
         self.n_labels = n_labels
         self.starting_budget = budget
         self.root = MondrianNode(n_dims, n_labels, None, budget)
+        self._scorer = scorer(scoring, self.root)
         
     
     def extend(self, data, labels):
         self._extend_node(self.root, data, labels)
 
 
-    def extend_from(self, data_var, labels_var):
-        """
-        A convenience function for parallel/remote operation.
-
-        data_var and labels_var contain the names of variables in the
-        global namespace, where this function will look for the data
-        and labels respectively. Otherwise, identical to extend.
-        """
-        data = globals()[data_var]
-        labels = globals()[labels_var]
-        self._extend_node(self.root, data, labels)
-    
-    
     def _extend_node(self, node, data, labels):
         
         min_d = get_colwise_min(data)
@@ -291,40 +359,14 @@ class MondrianTree(object):
 
 
     def predict(self, row):
-        # Dumb-ass scoring, just for now
-        node = self.root
-        last_counts_seen = node.label_counts
-        while node.label_counts.sum() > 0 and not node.is_leaf():
-            last_counts_seen = node.label_counts
-            left = node.apply_split(row)
-            node = node.left if left else node.right
-        # FIXME why do we sometimes get tiny floats in here, when they should be just counts (ints)?
-        if np.allclose(last_counts_seen, 0):
-            return np.zeros_like(last_counts_seen)
-        # L1 normalize
-        return normalize(last_counts_seen)
+        return self._scorer.predict(row)
 
 
-    def predict_from(self, row_var, out_var):
-        """
-        A convenience function for parallel/remote operation.
-
-        row_var contains the name of a variable in the global
-        namespace, where this function will look for a row
-        vector to classify. It will put the resulting vector
-        of class scores into another global variable, whose
-        name is supplied in the out_var param. Otherwise,
-        identical to predict.
-        """
-        row = globals()[row_var]
-        globals()[out_var] = self.predict(row)
-    
-    
 class MondrianForest(object):
 
     
-    def __init__(self, n_trees, n_dims, n_labels, budget):
-        self.trees = [MondrianTree(n_dims, n_labels, budget) for k in range(n_trees)]
+    def __init__(self, n_trees, n_dims, n_labels, budget, scoring):
+        self.trees = [MondrianTree(n_dims, n_labels, budget, scoring) for k in range(n_trees)]
     
 
     def update(self, data, labels):
@@ -340,10 +382,10 @@ class MondrianForest(object):
 class ParallelMondrianForest(object):
 
 
-    def __init__(self, ipy_view, n_dims, n_labels, budget):
+    def __init__(self, ipy_view, n_dims, n_labels, budget, scoring):
         self._view = ipy_view
         self._remote_name = 'mondrian_worker'
-        self._view.apply_sync(init_tree, n_dims, n_labels, budget, os.path.realpath(__file__), self._remote_name)
+        self._view.apply_sync(init_tree, n_dims, n_labels, budget, scoring, os.path.realpath(__file__), self._remote_name)
 
 
     def update(self, data, labels):
