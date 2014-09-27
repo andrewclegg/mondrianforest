@@ -1,6 +1,8 @@
 import random
 import os
 import numpy as np
+
+from collections import deque
 from numba import jit, njit
 
 
@@ -172,7 +174,9 @@ class NSPScorer(object):
         if not hasattr(self, '_n_labels'):
             self._tables = {}
             self._pseudocounts = {}
+            self._posteriors = {}
             self._n_labels = leaf_node.n_labels
+            self._prior = np.ones(self._n_labels) / self._n_labels # Uniform prior
 
         self._tables[leaf_node] = np.zeros(self._n_labels)
         self._pseudocounts[leaf_node] = np.zeros(self._n_labels)
@@ -187,6 +191,7 @@ class NSPScorer(object):
         pc = self._pseudocounts
         t = self._tables
 
+        # First, update all the class pseudocounts, from this node up
         # TODO optimize this
         for label in labels:
             pc[node][label] += 1
@@ -200,13 +205,33 @@ class NSPScorer(object):
 
                 t[node][label] = min(pc[node][label], 1)
 
-                if node == self._root:
+                if node.parent is None:
+                    root = node
                     break
                 node = node.parent
+
+        # Then, update the posterior probabilities, from the root down
+        todo = deque([root])
+        while todo:
+            next_node = todo.pop()
+            if next_node == root:
+                prior = self._prior
+            else:
+                prior = self._posteriors[next_node.parent]
+            d = self._discounts[node]
+            # TODO this doesn't take into account the *real* counts where we've left data in internal nodes
+            self._posteriors[node] = (pc[node] - (d * t[node]) + (d * t[node].sum() * prior)) / pc[node].sum()
+            if node.left:
+                todo.append(node.left)
+            if node.right:
+                todo.append(node.right)
 
 
     def predict(self, row):
         pass # TODO
+
+
+# TODO add _discounts
 
 
 class MondrianTree(object):
