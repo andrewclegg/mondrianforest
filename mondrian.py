@@ -6,13 +6,13 @@ from numba import jit, njit
 
 def scorer(name, tree):
     """
-    Initialize a scorer of the specified type (currently 'simple')
+    Initialize a scorer of the specified type (currently 'nsp' or 'simple')
     for the supplied tree, and return it.
     """
     if name == 'simple':
         scorer = SimpleScorer()
-#    elif name == 'nsp':
-#        scorer = NSPScorer()
+    elif name == 'nsp':
+        scorer = NSPScorer()
     else:
         raise ValueError('Unknown scorer ' + name)
     scorer.attach(tree)
@@ -136,6 +136,11 @@ class SimpleScorer(object):
         self._root = root_node
 
 
+    def on_create(self, leaf_node):
+        # TODO can we do some clever caching so we do less calculation during prediction?
+        pass
+
+
     def on_update(self, leaf_node, label):
         # TODO can we do some clever caching so we do less calculation during prediction?
         pass
@@ -155,7 +160,7 @@ class SimpleScorer(object):
         return normalize(last_counts_seen)
 
 
-class NSPScorer(object): # TODO on_split or something?
+class NSPScorer(object):
 
 
     def attach(self, root_node):
@@ -165,6 +170,13 @@ class NSPScorer(object): # TODO on_split or something?
         self._n_labels = root_node.n_labels
         self._tables = {root_node: np.zeros(self._n_labels)}
         self._pseudocounts = {root_node: np.zeros(self._n_labels)}
+
+
+    def on_create(self, leaf_node):
+        if not leaf_node.is_leaf():
+            raise ValueError('NSPScorer only supports on_create for leaf nodes')
+        self._tables[leaf_node] = np.zeros(self._n_labels)
+        self._pseudocounts[leaf_node] = np.zeros(self._n_labels)
 
 
     def on_update(self, leaf_node, label):
@@ -189,6 +201,9 @@ class NSPScorer(object): # TODO on_split or something?
                 return
             node = node.parent
 
+
+    def predict(self, row):
+        pass # TODO
 
 
 class MondrianTree(object):
