@@ -4,10 +4,9 @@ import numpy as np
 from numba import jit, njit
 
 
-def scorer(name, tree):
+def scorer(name):
     """
-    Initialize a scorer of the specified type (currently 'nsp' or 'simple')
-    for the supplied tree, and return it.
+    Initialize a scorer of the specified type (currently 'nsp' or 'simple') and return it.
     """
     if name == 'simple':
         scorer = SimpleScorer()
@@ -15,7 +14,6 @@ def scorer(name, tree):
         scorer = NSPScorer()
     else:
         raise ValueError('Unknown scorer ' + name)
-    scorer.attach(tree)
     return scorer
 
 
@@ -84,7 +82,7 @@ def normalize(vec):
 class MondrianNode(object):
 
     
-    def __init__(self, n_dims, n_labels, parent, budget):
+    def __init__(self, n_dims, n_labels, parent, budget, scorer):
         self.min_d = np.empty(n_dims)
         self.max_d = np.empty(n_dims)
         self.range_d = np.empty(n_dims)
@@ -97,7 +95,9 @@ class MondrianNode(object):
         self.right = None
         self.split_dim = None
         self.split_point = None
-        
+        self._scorer = scorer
+        self._scorer.on_create(self)
+
     
     def update(self, data, labels):
         # Update bounding box and label counts
@@ -106,8 +106,7 @@ class MondrianNode(object):
         self.range_d = get_data_range(self.min_d, self.max_d)
         self.sum_range_d = np.sum(self.range_d)
         self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
-        # To do prediction like the paper describes, we'd
-        # need to propagate label counts upwards from here
+        self._scorer.on_update(self, labels)
         
 
     def apply_split(self, data):
@@ -132,30 +131,32 @@ class MondrianNode(object):
 class SimpleScorer(object):
 
 
-    def attach(self, root_node):
-        self._root = root_node
-
-
-    def on_create(self, leaf_node):
+    def on_create(self, node):
         # TODO can we do some clever caching so we do less calculation during prediction?
-        pass
+        if not hasattr(self, '_root'):
+            if node.parent is not None:
+                raise ValueError('on_create must be called with root node before any others')
+            self._root = node
 
 
-    def on_update(self, leaf_node, label):
+    def on_update(self, node, labels):
         # TODO can we do some clever caching so we do less calculation during prediction?
         pass
 
 
     def predict(self, row):
+
         node = self._root
         last_counts_seen = node.label_counts
         while node.label_counts.sum() > 0 and not node.is_leaf():
             last_counts_seen = node.label_counts
             left = node.apply_split(row)
             node = node.left if left else node.right
+
         # FIXME why do we sometimes get tiny floats in here, when they should be just counts (ints)?
         if np.allclose(last_counts_seen, 0):
             return np.zeros_like(last_counts_seen)
+
         # L1 normalize
         return normalize(last_counts_seen)
 
@@ -163,43 +164,45 @@ class SimpleScorer(object):
 class NSPScorer(object):
 
 
-    def attach(self, root_node):
-        if not root_node.is_leaf():
-            raise ValueError('Attach the scorer object to a tree before adding any data to it')
-        self._root = root_node
-        self._n_labels = root_node.n_labels
-        self._tables = {root_node: np.zeros(self._n_labels)}
-        self._pseudocounts = {root_node: np.zeros(self._n_labels)}
-
-
     def on_create(self, leaf_node):
+
         if not leaf_node.is_leaf():
-            raise ValueError('NSPScorer only supports on_create for leaf nodes')
+            raise ValueError('on_create called for non-leaf node')
+
+        if not hasattr(self, '_n_labels'):
+            self._tables = {}
+            self._pseudocounts = {}
+            self._n_labels = leaf_node.n_labels
+
         self._tables[leaf_node] = np.zeros(self._n_labels)
         self._pseudocounts[leaf_node] = np.zeros(self._n_labels)
 
 
-    def on_update(self, leaf_node, label):
+    def on_update(self, leaf_node, labels):
+
         if not leaf_node.is_leaf():
-            raise ValueError('NSPScorer only supports on_update for leaf nodes')
+            raise ValueError('on_update called for non-leaf node')
 
         node = leaf_node
         pc = self._pseudocounts
         t = self._tables
-        pc[node][label] += 1
 
-        while True:
-            if t[node][label] == 1:
-                return
-            
-            if not is_leaf(node):
-                pc[node][label] = t[node.left][label] + t[node.right][label]
+        # TODO optimize this
+        for label in labels:
+            pc[node][label] += 1
 
-            t[node][label] = min(pc[node][label], 1)
+            while True:
+                if t[node][label] == 1:
+                    break
+                
+                if not is_leaf(node):
+                    pc[node][label] = t[node.left][label] + t[node.right][label]
 
-            if node == self._root:
-                return
-            node = node.parent
+                t[node][label] = min(pc[node][label], 1)
+
+                if node == self._root:
+                    break
+                node = node.parent
 
 
     def predict(self, row):
@@ -213,8 +216,8 @@ class MondrianTree(object):
         self.n_dims = n_dims
         self.n_labels = n_labels
         self.starting_budget = budget
-        self.root = MondrianNode(n_dims, n_labels, None, budget)
-        self._scorer = scorer(scoring, self.root)
+        self._scorer = scorer(scoring)
+        self.root = MondrianNode(n_dims, n_labels, None, budget, self._scorer)
         
     
     def extend(self, data, labels):
@@ -274,7 +277,7 @@ class MondrianTree(object):
         assert not node.is_leaf() # Mutate leaf nodes by growing, not splitting
         
         # Create new parent node which is a near-copy of the one that's splitting
-        new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, budget=node.budget)
+        new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, node.budget, self._scorer)
         new_parent.min_d = np.fmin(min_d, node.min_d)
         new_parent.max_d = np.fmax(max_d, node.max_d)
         new_parent.range_d = get_data_range(new_parent.min_d, new_parent.max_d)
@@ -300,7 +303,7 @@ class MondrianTree(object):
         
         # Now create new child node which is initially empty -- new sibling for original node
         new_budget = node.budget - split_cost
-        new_sibling = MondrianNode(self.n_dims, self.n_labels, new_parent, budget=new_budget)
+        new_sibling = MondrianNode(self.n_dims, self.n_labels, new_parent, new_budget, self._scorer)
         
         # This bit's clever -- since the split point is outside the original node's bounding box,
         # we might need to give some new data to that node, but we won't need to take any away
@@ -368,8 +371,8 @@ class MondrianTree(object):
             node.split_point = random.uniform(node.min_d[node.split_dim], node.max_d[node.split_dim])
             
             # TODO use the default budget here, or inherit from parent? Paper says default
-            node.left = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget)
-            node.right = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget)
+            node.left = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget, self._scorer)
+            node.right = MondrianNode(self.n_dims, self.n_labels, node, self.starting_budget, self._scorer)
             # No point growing these as they start off empty (unlike in original paper)
 
 
