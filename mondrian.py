@@ -4,7 +4,7 @@ import numpy as np
 
 from collections import deque
 
-from numba import jit, njit, float64
+from numba import jit, njit
 
 
 def scorer(name):
@@ -117,10 +117,6 @@ def get_posterior_class_probs(node, discount_param):
 
 
 def calc_posterior(label_counts, discount, tables, prior):
-    """
-    Helper function for get_posterior_class_probs and anywhere else you
-    need to calculate a posterior distribution over class labels.
-    """
     return (label_counts
             - discount * tables
             + discount * tables.sum() * prior) / label_counts.sum()
@@ -129,7 +125,7 @@ def calc_posterior(label_counts, discount, tables, prior):
 @jit
 def colwise_max(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols)
+    res = np.empty(n_cols, dtype=data.dtype)
     colwise_max_(data, n_rows, n_cols, res)
     return res
 
@@ -147,7 +143,7 @@ def colwise_max_(data, n_rows, n_cols, res):
 @jit
 def colwise_min(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols)
+    res = np.empty(n_cols, dtype=data.dtype)
     colwise_min_(data, n_rows, n_cols, res)
     return res
 
@@ -596,11 +592,7 @@ class NSPScorerNotWorking(object):
         return pred_prob
 
 
-calc_box_growth_types = {'total': float64,
-                         'l_extension': float64,
-                         'u_extension': float64}
-
-@njit('f8(f8[:,:],f8[:],f8[:])', locals=calc_box_growth_types)
+@njit('f8(f8[:,:],f8[:],f8[:])')
 def calc_bbox_growth(data, node_min_d, node_max_d):
     """
     Calculate the difference in linear dimension between the
