@@ -188,31 +188,45 @@ class NSPScorer(object):
     DISCOUNT_PARAM = 10 # TODO un-hard-code me
 
 
+    def __init__(self):
+        self._root = None
+        self._tables = {}
+        self._pseudocounts = {}
+        self._posteriors = {}
+
+
     def _discount(self, node):
         return np.expm1(-self.DISCOUNT_PARAM * node.max_split_cost)
 
 
     def on_create(self, leaf_node):
 
+        print('on_create called with node', leaf_node)
+
         if not leaf_node.is_leaf():
-            raise ValueError('on_create called for non-leaf node')
-
-        if not hasattr(self, '_pseudocounts'):
-            self._tables = {}
-            self._pseudocounts = {}
-            self._posteriors = {}
-            self._prior = normalize(np.ones_like(leaf_node.label_counts)) # Uniform prior
-
-        self._tables[leaf_node] = np.zeros_like(self._prior)
+            raise ValueError('on_create called for non-leaf node ' + str(self._root))
 
         if leaf_node.parent is None:
-            if hasattr(self, '_root'):
-                raise ValueError('on_create called with a root node twice')
+            if self._root is not None:
+                raise ValueError('on_create has already been called for this tree, with root node ' + str(self._root))
             self._root = leaf_node
+            self._prior = normalize(np.ones_like(leaf_node.label_counts)) # Uniform prior
+
+        if leaf_node.parent is not None:
+            if self._root is None:
+                raise ValueError('on_create called for non-root node %s before being called with a root node' % str(leaf_node))
+
+        if leaf_node in self._tables:
+            raise ValueError('on_create has already been called for node ' + str(leaf_node))
+
+        self._tables[leaf_node] = np.zeros_like(self._prior)
 
         # For leaf nodes, pseudocounts are actually real counts -- these are stored
         # by the MondrianNode as they're used for other purposes too
         self._pseudocounts[leaf_node] = leaf_node.label_counts
+
+        # TODO is this the right place to do this???
+        self.on_update(leaf_node, [])
 
 
     def on_update(self, leaf_node, labels):
@@ -255,12 +269,21 @@ class NSPScorer(object):
             else:
                 prior = self._posteriors[next_node.parent]
 
-            d = self._discount(node)
-            self._posteriors[node] = (pc[node] - (d * t[node]) + (d * t[node].sum() * prior)) / pc[node].sum()
+            # If node has no data [yet], set posteriors equal to parent's
+            d = self._discount(next_node)
+            pc_sum = pc[node].sum()
+            if pc_sum > 0:
+                self._posteriors[next_node] = (pc[next_node] - (d * t[next_node]) + (d * t[next_node].sum() * prior)) / pc_sum
+            else:
+                self._posteriors[next_node] = prior
+            print('Priors for %s were:' % str(next_node))
+            print(prior)
+            print('Set posteriors for %s to:' % str(next_node))
+            print(self._posteriors[next_node])
             if node.left:
-                todo.append(node.left)
+                todo.append(next_node.left)
             if node.right:
-                todo.append(node.right)
+                todo.append(next_node.right)
 
 
     def predict(self, x_test):
@@ -271,6 +294,9 @@ class NSPScorer(object):
         prob_not_separated_yet = np.ones(x_test.shape[0])
         prob_separated = np.zeros(x_test.shape[0])
         d_idx_test = {self._root: np.arange(x_test.shape[0])}
+
+        print('Starting prediction task, query instances:')
+        print(x_test)
 
         todo = deque([self._root])
         while todo:
@@ -283,7 +309,7 @@ class NSPScorer(object):
             if node == self._root:
                 print('Inspecting root node')
             elif node.is_leaf():
-                print('Inspecting root node')
+                print('Inspecting leaf node')
             else:
                 print('Inspecting internal node')
 
@@ -313,20 +339,34 @@ class NSPScorer(object):
             expo_parameter_non_zero = expo_parameter[idx_non_zero]
             base = self._prior if node == self._root else self._posteriors[node.parent]
 
+            print('idx_non_zero', idx_non_zero)
+            print('idx_test_non_zero', idx_test_non_zero)
+            print('expo_parameter_non_zero', expo_parameter_non_zero)
+            print('base', base)
+
             if np.any(idx_non_zero):
                 num_tables_k = self._tables[node]
+#                print('num_tables_k', num_tables_k)
                 num_tables = num_tables_k.sum()
+#                print('num_tables', num_tables)
                 num_customers = self._pseudocounts[node].sum()
+#                print('num_customers', num_customers)
                 # expected discount (averaging over time of cut which is a truncated exponential)
                 discount = (expo_parameter_non_zero / (expo_parameter_non_zero + self.DISCOUNT_PARAM)) \
                                 * (-np.expm1(-(expo_parameter_non_zero + self.DISCOUNT_PARAM) * node.max_split_cost)) \
                                 / (-np.expm1(-expo_parameter_non_zero * node.max_split_cost))
+#                print('discount', discount)
                 discount_per_num_customers = discount / num_customers
+#                print('discount_per_num_customers', discount_per_num_customers)
                 pred_prob_tmp = num_tables * discount_per_num_customers[:, np.newaxis] * base \
                                 + self._pseudocounts[node] / num_customers - discount_per_num_customers[:, np.newaxis] * num_tables_k
+#                print('pred_prob_tmp', pred_prob_tmp)
                 pred_prob[idx_test_non_zero, :] += prob_separated_now[idx_non_zero][:, np.newaxis] \
                                                     * prob_not_separated_yet[idx_test_non_zero][:, np.newaxis] * pred_prob_tmp
+#                print('pred_prob[idx_test_non_zero, :]', pred_prob[idx_test_non_zero, :])
                 prob_not_separated_yet[idx_test] *= prob_not_separated_now
+#                print('prob_not_separated_now', prob_not_separated_now)
+#                print('prob_not_separated_yet[idx_test]', prob_not_separated_yet[idx_test])
 
             # predictions for idx_test_zero
             if np.isinf(node.max_split_cost) and np.any(idx_zero):
@@ -343,6 +383,10 @@ class NSPScorer(object):
             # except KeyError:
             #     pass
 
+            print('Probabilities at end of loop iteration:')
+            print(pred_prob)
+
+        print('Prediction task done')
         return pred_prob
 
 
