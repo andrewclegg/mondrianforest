@@ -175,7 +175,7 @@ def normalize(array):
     return res
 
 
-@njit
+@njit('void(f8[:],f8[:])')
 def normalize_(vec, res):
     total = vec[0]
     length = len(vec)
@@ -185,7 +185,7 @@ def normalize_(vec, res):
         res[i] = vec[i] / total
 
 
-@njit
+@njit('void(f8[:,:],f8[:,:])')
 def normalize__(array, res):
     n_rows, n_cols = array.shape
     for i in range(n_rows):
