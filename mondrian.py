@@ -283,14 +283,12 @@ class MondrianNode(object):
     def apply_split(self, data):
         # Apply this node's existing splitting criterion to some data (vector or array)
         # and return a boolean index (True==goes left, False==goes right)
-        # data_array = np.atleast_2d(data)
-        # return data_array[:, self.split_dim] <= self.split_point
         dim = self.split_dim
         threshold = self.split_point
-        if data.ndim == 1:
-            return data[dim] <= threshold
-        else:
+        if data.ndim > 1:
             return split(data, dim, threshold)
+        else:
+            return data[dim] <= threshold
     
     
     def is_leaf(self):
