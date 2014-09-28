@@ -126,12 +126,12 @@ def calc_posterior(label_counts, discount, tables, prior):
 def colwise_max(data):
     n_rows, n_cols = data.shape
     res = np.empty(n_cols, dtype=data.dtype)
-    colwise_max_(data, n_rows, n_cols, res)
+    colwise_max__(data, n_rows, n_cols, res)
     return res
 
 
 @njit
-def colwise_max_(data, n_rows, n_cols, res):
+def colwise_max__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_max = data[0, j]
         for i in range(1, n_rows):
@@ -144,12 +144,12 @@ def colwise_max_(data, n_rows, n_cols, res):
 def colwise_min(data):
     n_rows, n_cols = data.shape
     res = np.empty(n_cols, dtype=data.dtype)
-    colwise_min_(data, n_rows, n_cols, res)
+    colwise_min__(data, n_rows, n_cols, res)
     return res
 
 
 @njit
-def colwise_min_(data, n_rows, n_cols, res):
+def colwise_min__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_min = data[0, j]
         for i in range(1, n_rows):
@@ -196,6 +196,60 @@ def normalize__(array, res):
             res[i, j] = array[i, j] / total
 
 
+@njit
+def split__(array, length, dim, threshold, res):
+    for i in range(length):
+        if array[i, dim] <= threshold:
+            res[i] = True
+
+
+@jit('f8[:](f8[:,:],i4,f8)')
+def split(array, dim, threshold):
+    length = len(array)
+    res = np.zeros((length), dtype=bool)
+    split__(array, length, dim, threshold, res)
+    return res
+
+
+@njit('f8(f8[:,:],f8[:],f8[:])')
+def calc_bbox_growth(data, node_min_d, node_max_d):
+    """
+    Calculate the difference in linear dimension between the
+    current node, and the incoming data. Roughly, this means
+    calculating how much the bounding box would have to grow
+    to accommodate all the new points, in each dimension, and
+    then summing across these dimensions.
+    """
+    n_rows, n_cols = data.shape
+    total = 0
+    for j in range(n_cols):
+
+        # Keep track of maximum extension required for lower
+        # and upper bound, respectively, in this dimension
+        l_extension = 0
+        u_extension = 0
+
+        # Loop over data points
+        for i in range(0, n_rows):
+
+            # Does this data point exceed the lower bound by more
+            # than previous furthest example?
+            e = node_min_d[j] - data[i, j]
+            if e > l_extension:
+                l_extension = e
+
+            # Does this data point exceed the upper bound by more
+            # than previous furthest example?
+            e = data[i, j] - node_max_d[j]
+            if e > u_extension:
+                u_extension = e
+
+        # Add furthest extensions in this dimension to running total
+        total += l_extension + u_extension
+        
+    return total 
+
+
 class MondrianNode(object):
 
     
@@ -229,8 +283,14 @@ class MondrianNode(object):
     def apply_split(self, data):
         # Apply this node's existing splitting criterion to some data (vector or array)
         # and return a boolean index (True==goes left, False==goes right)
-        data_array = np.atleast_2d(data)
-        return data_array[:, self.split_dim] <= self.split_point
+        # data_array = np.atleast_2d(data)
+        # return data_array[:, self.split_dim] <= self.split_point
+        dim = self.split_dim
+        threshold = self.split_point
+        if data.ndim == 1:
+            return data[dim] <= threshold
+        else:
+            return split(data, dim, threshold)
     
     
     def is_leaf(self):
@@ -590,45 +650,6 @@ class NSPScorerNotWorking(object):
 
         print('Prediction task done')
         return pred_prob
-
-
-@njit('f8(f8[:,:],f8[:],f8[:])')
-def calc_bbox_growth(data, node_min_d, node_max_d):
-    """
-    Calculate the difference in linear dimension between the
-    current node, and the incoming data. Roughly, this means
-    calculating how much the bounding box would have to grow
-    to accommodate all the new points, in each dimension, and
-    then summing across these dimensions.
-    """
-    n_rows, n_cols = data.shape
-    total = 0
-    for j in range(n_cols):
-
-        # Keep track of maximum extension required for lower
-        # and upper bound, respectively, in this dimension
-        l_extension = 0
-        u_extension = 0
-
-        # Loop over data points
-        for i in range(0, n_rows):
-
-            # Does this data point exceed the lower bound by more
-            # than previous furthest example?
-            e = node_min_d[j] - data[i, j]
-            if e > l_extension:
-                l_extension = e
-
-            # Does this data point exceed the upper bound by more
-            # than previous furthest example?
-            e = data[i, j] - node_max_d[j]
-            if e > u_extension:
-                u_extension = e
-
-        # Add furthest extensions in this dimension to running total
-        total += l_extension + u_extension
-        
-    return total 
 
 
 class MondrianTree(object):
