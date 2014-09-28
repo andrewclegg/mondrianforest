@@ -122,15 +122,15 @@ def calc_posterior(label_counts, discount, tables, prior):
             + discount * tables.sum() * prior) / label_counts.sum()
 
 
-@jit
+@jit('f8[:](f8[:,:])')
 def colwise_max(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols, dtype=data.dtype)
+    res = np.empty(n_cols, dtype=np.float64)
     colwise_max__(data, n_rows, n_cols, res)
     return res
 
 
-@njit
+@njit('void(f8[:,:],u4,u4,f8[:])')
 def colwise_max__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_max = data[0, j]
@@ -140,15 +140,15 @@ def colwise_max__(data, n_rows, n_cols, res):
         res[j] = curr_max
 
 
-@jit
+@jit('f8[:](f8[:,:])')
 def colwise_min(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols, dtype=data.dtype)
+    res = np.empty(n_cols, dtype=np.float64)
     colwise_min__(data, n_rows, n_cols, res)
     return res
 
 
-@njit
+@njit('void(f8[:,:],u4,u4,f8[:])')
 def colwise_min__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_min = data[0, j]
@@ -156,6 +156,11 @@ def colwise_min__(data, n_rows, n_cols, res):
             if data[i, j] < curr_min:
                 curr_min = data[i, j]
         res[j] = curr_min
+
+
+def calc_bbox_stats(data):
+    n_rows, n_cols = data.shape
+    # TODO
 
 
 def sample_multinomial_scores(scores):
