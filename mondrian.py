@@ -1,10 +1,13 @@
 import random
 import os
+
 import numpy as np
 
 from collections import deque
 
 from numba import jit, njit
+
+from scipy.stats import truncexpon
 
 
 def scorer(name):
@@ -62,6 +65,10 @@ def combine_predictions(results):
 
 
 def depth_first(node):
+    """
+    Depth-first node iterator, not currently using this but it
+    might come in handy.
+    """
     if node is None:
         return
     yield node
@@ -109,7 +116,7 @@ def get_posterior_class_probs(node, discount_param):
     prior = get_prior_class_probs(node, discount_param)
     if np.any(node.label_counts):
         sum_counts = np.sum(node.label_counts)
-        discount = np.expm1(-discount_param * node.max_split_cost)
+        discount = np.exp(-discount_param * node.max_split_cost)
         tables = get_tables(node)
         return calc_posterior(node.label_counts, discount, tables, prior)
     else:
@@ -117,9 +124,51 @@ def get_posterior_class_probs(node, discount_param):
 
 
 def calc_posterior(label_counts, discount, tables, prior):
+    """
+    Calculate the posterior class probabilities for a node.
+    """
     return (label_counts
             - discount * tables
             + discount * tables.sum() * prior) / label_counts.sum()
+
+
+def calc_discount(discount_factor, split_cost):
+    """
+    Calculate the discount parameter for a given split.
+
+    discount_factor is a user-supplied constant, defaulting
+    to 10. This is γ in the paper.
+
+    split_cost reflects time since the parent node was split.
+    This is ∆_j == τ_j - τ_parent(j) in the paper.
+
+    A higher discount_factor or split cost (age) will lead to
+    a smaller result, which will have the effect of weighting
+    the node's own data more strongly compared to the priors
+    inherited from its parent.
+    """
+    return np.exp(-discount_factor * split_cost)
+
+
+def expected_discount(discount_factor, exp_rate, upper_bound):
+    """
+    Calculate the expected discount for a new instance which we want
+    to make a prediction about, with regard to a node in a tree.
+    This is based on an exponential distribution, truncated to the
+    interval [0, upper_bound].
+
+    exp_rate is the rate parameter on the distribution -- η_j(x)
+    in the paper. This reflects how far outside the node's bounding
+    box the new point falls. The further this is, the more likely a
+    split is. The split costs described above are drawn from this
+    distribution, and also provide the upper bound (not sure I follow
+    this yet).
+    
+    The discount factor is also applied as before.
+    """
+    func = lambda d: np.exp(-discount_factor * d)
+    trunc_exp = truncexpon(exp_rate)
+    return trunc_exp.dist.expect(func, trunc_exp.args, lb=0, ub=upper_bound)
 
 
 @jit('f8[:](f8[:,:])')
@@ -350,15 +399,11 @@ class SimpleScorer(object):
 class NSPScorerNonCaching(object):
 
 
-    DISCOUNT_PARAM = 10 # TODO un-hard-code me
+    DISCOUNT_FACTOR = 10 # TODO un-hard-code me
 
     
     def __init__(self):
         self._root = None
-
-
-    def _discount(self, node):
-        return np.expm1(-self.DISCOUNT_PARAM * node.max_split_cost)
 
 
     # N.B. This is directly copied from SimpleScorer -- temporary measure
@@ -375,7 +420,7 @@ class NSPScorerNonCaching(object):
 
     def _predict(self, x):
         
-        print('Predicting for one row:', x)
+#        print('Predicting for one row:', x)
 
         previous_posterior = None
         node = self._root
@@ -384,48 +429,52 @@ class NSPScorerNonCaching(object):
 
         while True:
 
-            if node == self._root:
-                print('Inspecting root node')
-            elif node.is_leaf():
-                print('Inspecting leaf node')
-            else:
-                print('Inspecting internal node')
+#            if node == self._root:
+#                print('Inspecting root node')
+#            elif node.is_leaf():
+#                print('Inspecting leaf node')
+#            else:
+#                print('Inspecting internal node')
 
-            delta = node.max_split_cost
-            nu = np.sum(np.fmax(x - node.max_d, 0) + np.fmax(node.min_d - x, 0))
-            p_split = 1 - np.expm1(-delta * nu)
+            discount_ubound = node.max_split_cost
+            discount_rate_param = np.sum(np.fmax(x - node.max_d, 0)
+                                         + np.fmax(node.min_d - x, 0))
+            p_split = 1 - np.exp(-discount_ubound * discount_rate_param)
 
             if previous_posterior is None:
                 prior = normalize(np.ones_like(node.label_counts))
             else:
                 prior = previous_posterior
 
-            print('p_not_separated_yet', p_not_separated_yet)
-            print('delta', delta)
-            print('nu', nu)
-            print('p_split', p_split)
-            print('previous_posterior', previous_posterior)
-            print('prior', prior)
+#            print('p_not_separated_yet', p_not_separated_yet)
+#            print('discount_ubound', discount_ubound)
+#            print('discount_rate_param', discount_rate_param)
+#            print('p_split', p_split)
+#            print('previous_posterior', previous_posterior)
+#            print('prior', prior)
 
             if p_split > 0:
 
-                expected_discount = 1 / (-self.DISCOUNT_PARAM * delta)
+                expected_d = expected_discount(
+                        self.DISCOUNT_FACTOR,
+                        discount_rate_param,
+                        discount_ubound)
+
                 tab_new_node = np.fmin(node.label_counts, 1)
                 counts_new_node = tab_new_node
-                posterior_new_node = (counts_new_node
-                                      - expected_discount * tab_new_node
-                                      + expected_discount * tab_new_node.sum() * prior) / counts_new_node.sum()
+                posterior_new_node = calc_posterior(counts_new_node, expected_d,
+                                                    tab_new_node, prior)
 
                 s = s + p_not_separated_yet * p_split * posterior_new_node
 
-                print('expected_discount', expected_discount)
-                print('tab_new_node', tab_new_node)
-                print('posterior_new_node', posterior_new_node)
-                print('s', s)
+#                print('expected_d', expected_d)
+#                print('tab_new_node', tab_new_node)
+#                print('posterior_new_node', posterior_new_node)
+#                print('s', s)
 
             if node.is_leaf():
-                s = s + p_not_separated_yet * (1 - p_split) * posterior
-                print('s', s)
+                s = s + p_not_separated_yet * (1 - p_split) * previous_posterior
+#                print('s', s)
                 return s
             else:
                 p_not_separated_yet = p_not_separated_yet * (1 - p_split)
@@ -433,7 +482,7 @@ class NSPScorerNonCaching(object):
                     node = node.left
                 else:
                     node = node.right
-                previous_posterior = posterior
+                previous_posterior = get_posterior_class_probs(node, self.DISCOUNT_FACTOR)
 
 
     def predict(self, x):
@@ -456,7 +505,7 @@ class NSPScorerNotWorking(object):
 
 
     def _discount(self, node):
-        return np.expm1(-self.DISCOUNT_PARAM * node.max_split_cost)
+        return np.exp(-self.DISCOUNT_PARAM * node.max_split_cost)
 
 
     def on_create(self, leaf_node):
@@ -584,7 +633,7 @@ class NSPScorerNotWorking(object):
             distance_lower = np.fmax(0, node.min_d - x).sum(1)
             distance_upper = np.fmax(0, x - node.max_d).sum(1)
             expo_parameter = distance_lower + distance_upper
-            prob_not_separated_now = np.expm1(-expo_parameter * node.max_split_cost)
+            prob_not_separated_now = np.exp(-expo_parameter * node.max_split_cost)
             prob_separated_now = 1 - prob_not_separated_now
 
             if np.isinf(node.max_split_cost):
