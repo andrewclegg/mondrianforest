@@ -196,14 +196,14 @@ def normalize__(array, res):
             res[i, j] = array[i, j] / total
 
 
-@njit
+@njit('void(f8[:,:],i4,i4,f8,b1[:])')
 def split__(array, length, dim, threshold, res):
     for i in range(length):
         if array[i, dim] <= threshold:
             res[i] = True
 
 
-@jit('f8[:](f8[:,:],i4,f8)')
+@jit('b1[:](f8[:,:],i4,f8)')
 def split(array, dim, threshold):
     length = len(array)
     res = np.zeros((length), dtype=bool)
