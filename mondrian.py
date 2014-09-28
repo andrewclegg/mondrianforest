@@ -14,7 +14,7 @@ def scorer(name):
     if name == 'simple':
         scorer = SimpleScorer()
     elif name == 'nsp':
-        scorer = NSPScorer()
+        scorer = NSPScorerNonCaching()
     else:
         raise ValueError('Unknown scorer ' + name)
     return scorer
@@ -61,22 +61,103 @@ def combine_predictions(results):
     return normalize(summed)
 
 
-@jit('f8[:](f8[:,:])')
-def get_colwise_min(data):
-    return np.amin(data, axis=0)
+def depth_first(node):
+    if node is None:
+        return
+    yield node
+    for kid in depth_first(node.left):
+        yield node
+    for kid in depth_first(node.right):
+        yield node
 
 
-@jit('f8[:](f8[:,:])')
-def get_colwise_max(data):
-    return np.amax(data, axis=0)
+def get_tables(node):
+    """
+    Get the IKN approximation of the label counts at this node.
+    More specifically, this returns a boolean vector containing
+    True where this node (or a child) *does* contain that label,
+    and False otherwise.
+
+    We use a small modification of the formulation in the paper.
+    Specifically, non-leaf nodes can have counts associated with
+    them, which they observed before getting split. These are
+    taken into account along with the counts on child nodes.
+    """
+    my_tables = node.label_counts.astype(bool)
+    my_tables = my_tables | (node.left is not None and get_tables(node.left))
+    my_tables = my_tables | (node.right is not None and get_tables(node.right))
+    return my_tables
 
 
-@jit('f8[:](f8[:], f8[:])')
-def get_data_range(min_d, max_d):
-    return max_d - min_d
+def get_prior_class_probs(node, discount_param):
+    """
+    Get the IKN prior for the class probabilities at this node,
+    with the specified discount rate.
+    """
+    if node.parent is None:
+        return normalize(np.ones_like(node.label_counts))
+    else:
+        return get_posterior_class_probs(node.parent, discount_param)
 
 
-@jit('f8(f8[:])')
+def get_posterior_class_probs(node, discount_param):
+    """
+    Get the posterior class probabilities for a node, taking into
+    account its IKN prior along with any counts observed at (or
+    below) this node.
+    """
+    prior = get_prior_class_probs(node, discount_param)
+    if np.any(node.label_counts):
+        sum_counts = np.sum(node.label_counts)
+        discount = np.expm1(-discount_param * node.max_split_cost)
+        tables = get_tables(node)
+        return calc_posterior(node.label_counts, discount, tables, prior)
+    else:
+        return prior
+
+
+def calc_posterior(label_counts, discount, tables, prior):
+    return (label_counts
+            - discount * tables
+            + discount * tables.sum() * prior) / label_counts.sum()
+
+
+@jit
+def colwise_max(data):
+    n_rows, n_cols = data.shape
+    res = np.empty(n_cols, dtype=data.dtype)
+    colwise_max_(data, n_rows, n_cols, res)
+    return res
+
+
+@njit
+def colwise_max_(data, n_rows, n_cols, res):
+    for j in range(n_cols):
+        curr_max = data[0, j]
+        for i in range(1, n_rows):
+            if data[i, j] > curr_max:
+                curr_max = data[i, j]
+        res[j] = curr_max
+
+
+@jit
+def colwise_min(data):
+    n_rows, n_cols = data.shape
+    res = np.empty(n_cols, dtype=data.dtype)
+    colwise_min_(data, n_rows, n_cols, res)
+    return res
+
+
+@njit
+def colwise_min_(data, n_rows, n_cols, res):
+    for j in range(n_cols):
+        curr_min = data[0, j]
+        for i in range(1, n_rows):
+            if data[i, j] < curr_min:
+                curr_min = data[i, j]
+        res[j] = curr_min
+
+
 def sample_multinomial_scores(scores):
     scores_cumsum = np.cumsum(scores)
     s = scores_cumsum[-1] * np.random.rand(1)
@@ -84,13 +165,35 @@ def sample_multinomial_scores(scores):
     return k
 
 
-@jit('f8[:](f8[:])')
+@jit
 def normalize(array):
+    res = np.empty_like(array)
     if array.ndim == 1:
-        return array / array.sum()
+        normalize_(array, res)
     else:
-        row_totals = array.sum(axis=1)[:, np.newaxis]
-        return array / row_totals
+        normalize__(array, res)
+    return res
+
+
+@njit
+def normalize_(vec, res):
+    total = vec[0]
+    length = len(vec)
+    for i in range(1, length):
+        total += vec[i]
+    for i in range(length):
+        res[i] = vec[i] / total
+
+
+@njit
+def normalize__(array, res):
+    n_rows, n_cols = array.shape
+    for i in range(n_rows):
+        total = array[i, 0]
+        for j in range(1, n_cols):
+            total += array[i, j]
+        for j in range(n_cols):
+            res[i, j] = array[i, j] / total
 
 
 class MondrianNode(object):
@@ -115,9 +218,9 @@ class MondrianNode(object):
     
     def update(self, data, labels):
         # Update bounding box and label counts
-        self.min_d = get_colwise_min(data)
-        self.max_d = get_colwise_max(data)
-        self.range_d = get_data_range(self.min_d, self.max_d)
+        self.min_d = colwise_min(data)
+        self.max_d = colwise_max(data)
+        self.range_d = self.max_d - self.min_d
         self.sum_range_d = np.sum(self.range_d)
         self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
         self._scorer.on_update(self, labels)
@@ -146,11 +249,15 @@ class MondrianNode(object):
 class SimpleScorer(object):
 
 
+    def __init__(self):
+        self._root = None
+
+
     def on_create(self, node):
         # TODO can we do some clever caching so we do less calculation during prediction?
-        if not hasattr(self, '_root'):
+        if self._root is None:
             if node.parent is not None:
-                raise ValueError('on_create must be called with root node before any others')
+                raise ValueError('Error: called on_create with a non-root node the first time')
             self._root = node
 
 
@@ -182,7 +289,102 @@ class SimpleScorer(object):
         return np.apply_along_axis(self._predict, 1, x_array)
 
 
-class NSPScorer(object):
+class NSPScorerNonCaching(object):
+
+
+    DISCOUNT_PARAM = 10 # TODO un-hard-code me
+
+    
+    def __init__(self):
+        self._root = None
+
+
+    def _discount(self, node):
+        return np.expm1(-self.DISCOUNT_PARAM * node.max_split_cost)
+
+
+    # N.B. This is directly copied from SimpleScorer -- temporary measure
+    def on_create(self, node):
+        if self._root is None:
+            if node.parent is not None:
+                raise ValueError('Error: called on_create with a non-root node the first time')
+            self._root = node
+
+
+    def on_update(self, node, labels):
+        pass
+
+
+    def _predict(self, x):
+        
+        print('Predicting for one row:', x)
+
+        previous_posterior = None
+        node = self._root
+        p_not_separated_yet = 1
+        s = np.zeros_like(self._root.label_counts)
+
+        while True:
+
+            if node == self._root:
+                print('Inspecting root node')
+            elif node.is_leaf():
+                print('Inspecting leaf node')
+            else:
+                print('Inspecting internal node')
+
+            delta = node.max_split_cost
+            nu = np.sum(np.fmax(x - node.max_d, 0) + np.fmax(node.min_d - x, 0))
+            p_split = 1 - np.expm1(-delta * nu)
+
+            if previous_posterior is None:
+                prior = normalize(np.ones_like(node.label_counts))
+            else:
+                prior = previous_posterior
+
+            print('p_not_separated_yet', p_not_separated_yet)
+            print('delta', delta)
+            print('nu', nu)
+            print('p_split', p_split)
+            print('previous_posterior', previous_posterior)
+            print('prior', prior)
+
+            if p_split > 0:
+
+                expected_discount = 1 / (-self.DISCOUNT_PARAM * delta)
+                tab_new_node = np.fmin(node.label_counts, 1)
+                counts_new_node = tab_new_node
+                posterior_new_node = (counts_new_node
+                                      - expected_discount * tab_new_node
+                                      + expected_discount * tab_new_node.sum() * prior) / counts_new_node.sum()
+
+                s = s + p_not_separated_yet * p_split * posterior_new_node
+
+                print('expected_discount', expected_discount)
+                print('tab_new_node', tab_new_node)
+                print('posterior_new_node', posterior_new_node)
+                print('s', s)
+
+            if node.is_leaf():
+                s = s + p_not_separated_yet * (1 - p_split) * posterior
+                print('s', s)
+                return s
+            else:
+                p_not_separated_yet = p_not_separated_yet * (1 - p_split)
+                if x[node.split_dim] <= node.split_point:
+                    node = node.left
+                else:
+                    node = node.right
+                previous_posterior = posterior
+
+
+    def predict(self, x):
+
+        x_array = np.atleast_2d(x)
+        return np.apply_along_axis(self._predict, 1, x_array)
+
+
+class NSPScorerNotWorking(object):
 
 
     DISCOUNT_PARAM = 10 # TODO un-hard-code me
@@ -407,8 +609,8 @@ class MondrianTree(object):
 
     def _extend_node(self, node, data, labels):
         
-        min_d = get_colwise_min(data)
-        max_d = get_colwise_max(data)
+        min_d = colwise_min(data)
+        max_d = colwise_max(data)
         additional_extent_lower = np.fmax(0, node.min_d - min_d)
         additional_extent_upper = np.fmax(0, max_d - node.max_d)
         expo_parameter = np.sum([additional_extent_lower, additional_extent_upper])
@@ -461,7 +663,7 @@ class MondrianTree(object):
         new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, node.budget, self._scorer)
         new_parent.min_d = np.fmin(min_d, node.min_d)
         new_parent.max_d = np.fmax(max_d, node.max_d)
-        new_parent.range_d = get_data_range(new_parent.min_d, new_parent.max_d)
+        new_parent.range_d = new_parent.max_d - new_parent.min_d
         new_parent.sum_range_d = np.sum(new_parent.range_d)
         new_parent.label_counts = node.label_counts
         
