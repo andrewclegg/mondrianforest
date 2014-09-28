@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 
-from collections import deque
+from collections import deque, defaultdict
 
 from functools import lru_cache
 
@@ -78,60 +78,6 @@ def depth_first(node):
         yield node
     for kid in depth_first(node.right):
         yield node
-
-
-def get_tables(node):
-    """
-    Get the IKN approximation of the label counts at this node.
-    More specifically, this returns a boolean vector containing
-    True where this node (or a child) *does* contain that label,
-    and False otherwise.
-
-    We use a small modification of the formulation in the paper.
-    Specifically, non-leaf nodes can have counts associated with
-    them, which they observed before getting split. These are
-    taken into account along with the counts on child nodes.
-    """
-    my_tables = node.label_counts.astype(bool)
-    my_tables = my_tables | (node.left is not None and get_tables(node.left))
-    my_tables = my_tables | (node.right is not None and get_tables(node.right))
-    return my_tables
-
-
-def get_prior_class_probs(node, discount_param):
-    """
-    Get the IKN prior for the class probabilities at this node,
-    with the specified discount rate.
-    """
-    if node.parent is not None:
-        return get_posterior_class_probs(node.parent, discount_param)
-    else:
-        return normalize(np.ones_like(node.label_counts))
-
-
-def get_posterior_class_probs(node, discount_param):
-    """
-    Get the posterior class probabilities for a node, taking into
-    account its IKN prior along with any counts observed at (or
-    below) this node.
-    """
-    prior = get_prior_class_probs(node, discount_param)
-    if np.any(node.label_counts):
-        sum_counts = np.sum(node.label_counts)
-        discount = np.exp(-discount_param * node.max_split_cost)
-        tables = get_tables(node)
-        return calc_posterior(node.label_counts, discount, tables, prior)
-    else:
-        return prior
-
-
-def calc_posterior(label_counts, discount, tables, prior):
-    """
-    Calculate the posterior class probabilities for a node.
-    """
-    return (label_counts
-            - discount * tables
-            + discount * tables.sum() * prior) / label_counts.sum()
 
 
 @lru_cache(maxsize=10000)
@@ -400,26 +346,86 @@ class SimpleScorer(object):
         return np.apply_along_axis(self._predict, 1, x_array)
 
 
+# TODO better names
+def calc_posterior(c, t, p, d):
+    return (c - d * t + d * t.sum() * p) / c.sum()
+
+
 class NSPScorerNaive(object):
 
 
     DISCOUNT_FACTOR = 10 # TODO un-hard-code me
 
-    
+
     def __init__(self):
         self._root = None
 
 
+    def _calc_prior(self, node):
+        if node == self._root:
+            return normalize(np.ones_like(node.label_counts))
+        else:
+            return self._calc_posterior(node.parent)
+
+
+    def _calc_posterior(self, node):
+        c = self._counts[node]
+        t = self._tables[node]
+        p = self._calc_prior(node)
+        if not c.any():
+            return p
+        d = calc_discount(self.DISCOUNT_FACTOR, node.max_split_cost)
+        posterior = calc_posterior(c, t, p, d)
+
+        # DEBUG
+        try:
+            assert (posterior >= 0).all()
+            assert np.allclose(posterior.sum(), 1)
+        except:
+            print('counts', c)
+            print('tables', t)
+            print('discount', d)
+            print('prior', p)
+            print('posterior', posterior)
+            raise
+
+        return posterior
+
+
     # N.B. This is directly copied from SimpleScorer -- temporary measure
     def on_create(self, node):
+#        print('on_create fired')
         if self._root is None:
             if node.parent is not None:
                 raise ValueError('Error: called on_create with a non-root node the first time')
             self._root = node
+            n = len(self._root.label_counts)
+            self._tables = defaultdict(lambda: np.zeros(n))
+            self._counts = defaultdict(lambda: np.zeros(n))
+ #           print('initialized ok')
 
 
     def on_update(self, node, labels):
-        pass
+#        print('on_update fired')
+#        print(labels)
+        for label in labels:
+            self._update_counts(node, label)
+#        print(self._tables)
+#        print(self._counts)
+
+
+    def _update_counts(self, node, label):
+        _t = self._tables
+        _c = self._counts
+        while node != None:
+            if _t[node][label] == 1:
+                return
+            if node.is_leaf():
+                _c[node][label] = node.label_counts[label]
+            else:
+                _c[node][label] = _t[node.left][label] + _t[node.right][label] + np.fmin(1, _c[node][label])
+            _t[node][label] = np.fmin(1, _c[node][label])
+            node = node.parent
 
 
     def _predict(self, x):
@@ -466,8 +472,8 @@ class NSPScorerNaive(object):
 
                 tab_new_node = np.fmin(node.label_counts, 1)
                 counts_new_node = tab_new_node
-                posterior_new_node = calc_posterior(counts_new_node, expected_d,
-                                                    tab_new_node, prior)
+                posterior_new_node = calc_posterior(counts_new_node, tab_new_node,
+                                                    prior, expected_d)
 
                 s = s + p_not_separated_yet * p_split * posterior_new_node
 
@@ -479,14 +485,40 @@ class NSPScorerNaive(object):
             if node.is_leaf():
                 s = s + p_not_separated_yet * (1 - p_split) * previous_posterior
 #                print('s', s)
+
+                # DEBUG
+                try:
+                    assert s.ndim == 1
+                    assert len(s) == len(self._root.label_counts)
+                    assert (s >= 0).all()
+                    assert np.allclose(s.sum(), 1)
+                except:
+                    print(s)
+                    print('p_not_separated_yet', p_not_separated_yet)
+                    print('p_split', p_split)
+                    print('previous_posterior', previous_posterior)
+                    raise
+
                 return s
+
             else:
                 p_not_separated_yet = p_not_separated_yet * (1 - p_split)
                 if x[node.split_dim] <= node.split_point:
                     node = node.left
                 else:
                     node = node.right
-                previous_posterior = get_posterior_class_probs(node, self.DISCOUNT_FACTOR)
+
+                previous_posterior = self._calc_posterior(node)
+
+                # DEBUG
+                try:
+                    assert previous_posterior.ndim == 1
+                    assert len(previous_posterior) == len(self._root.label_counts)
+                    assert (previous_posterior >= 0).all()
+                    assert np.allclose(previous_posterior.sum(), 1)
+                except:
+                    print(previous_posterior)
+                    raise
 
 
     def predict(self, x):
