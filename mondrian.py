@@ -4,7 +4,7 @@ import numpy as np
 
 from collections import deque
 
-from numba import jit, njit
+from numba import jit, njit, float64
 
 
 def scorer(name):
@@ -117,6 +117,10 @@ def get_posterior_class_probs(node, discount_param):
 
 
 def calc_posterior(label_counts, discount, tables, prior):
+    """
+    Helper function for get_posterior_class_probs and anywhere else you
+    need to calculate a posterior distribution over class labels.
+    """
     return (label_counts
             - discount * tables
             + discount * tables.sum() * prior) / label_counts.sum()
@@ -125,7 +129,7 @@ def calc_posterior(label_counts, discount, tables, prior):
 @jit
 def colwise_max(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols, dtype=data.dtype)
+    res = np.empty(n_cols)
     colwise_max_(data, n_rows, n_cols, res)
     return res
 
@@ -143,7 +147,7 @@ def colwise_max_(data, n_rows, n_cols, res):
 @jit
 def colwise_min(data):
     n_rows, n_cols = data.shape
-    res = np.empty(n_cols, dtype=data.dtype)
+    res = np.empty(n_cols)
     colwise_min_(data, n_rows, n_cols, res)
     return res
 
@@ -592,6 +596,49 @@ class NSPScorerNotWorking(object):
         return pred_prob
 
 
+calc_box_growth_types = {'total': float64,
+                         'l_extension': float64,
+                         'u_extension': float64}
+
+@njit('f8(f8[:,:],f8[:],f8[:])', locals=calc_box_growth_types)
+def calc_bbox_growth(data, node_min_d, node_max_d):
+    """
+    Calculate the difference in linear dimension between the
+    current node, and the incoming data. Roughly, this means
+    calculating how much the bounding box would have to grow
+    to accommodate all the new points, in each dimension, and
+    then summing across these dimensions.
+    """
+    n_rows, n_cols = data.shape
+    total = 0
+    for j in range(n_cols):
+
+        # Keep track of maximum extension required for lower
+        # and upper bound, respectively, in this dimension
+        l_extension = 0
+        u_extension = 0
+
+        # Loop over data points
+        for i in range(0, n_rows):
+
+            # Does this data point exceed the lower bound by more
+            # than previous furthest example?
+            e = node_min_d[j] - data[i, j]
+            if e > l_extension:
+                l_extension = e
+
+            # Does this data point exceed the upper bound by more
+            # than previous furthest example?
+            e = data[i, j] - node_max_d[j]
+            if e > u_extension:
+                u_extension = e
+
+        # Add furthest extensions in this dimension to running total
+        total += l_extension + u_extension
+        
+    return total 
+
+
 class MondrianTree(object):
     
     
@@ -609,11 +656,12 @@ class MondrianTree(object):
 
     def _extend_node(self, node, data, labels):
         
-        min_d = colwise_min(data)
-        max_d = colwise_max(data)
-        additional_extent_lower = np.fmax(0, node.min_d - min_d)
-        additional_extent_upper = np.fmax(0, max_d - node.max_d)
-        expo_parameter = np.sum([additional_extent_lower, additional_extent_upper])
+#        min_d = colwise_min(data)
+#        max_d = colwise_max(data)
+#        additional_extent_lower = np.fmax(0, node.min_d - min_d)
+#        additional_extent_upper = np.fmax(0, max_d - node.max_d)
+#        expo_parameter = np.sum([additional_extent_lower, additional_extent_upper])
+        expo_parameter = calc_bbox_growth(data, node.min_d, node.max_d)
         
         is_leaf = node.is_leaf()
         if expo_parameter == 0 or is_leaf:
@@ -626,8 +674,7 @@ class MondrianTree(object):
         
         if split_cost < node.max_split_cost and not is_leaf:
             # Stop what we're doing and instigate a node split instead
-            self._split_node(node, data, labels, split_cost, min_d, max_d,
-                             additional_extent_lower, additional_extent_upper)
+            self._split_node(node, data, labels, split_cost)
             return
 
         # Otherwise carry on updating the existing tree structure
@@ -654,11 +701,15 @@ class MondrianTree(object):
                 self._extend_node(node.right, r_data, r_labels)
 
 
-    def _split_node(self, node, data, labels, split_cost, min_d, max_d,
-                    additional_extent_lower, additional_extent_upper):
+    def _split_node(self, node, data, labels, split_cost):
         
         assert not node.is_leaf() # Mutate leaf nodes by growing, not splitting
         
+        min_d = colwise_min(data)
+        max_d = colwise_max(data)
+        additional_extent_lower = np.fmax(0, node.min_d - min_d)
+        additional_extent_upper = np.fmax(0, max_d - node.max_d)
+
         # Create new parent node which is a near-copy of the one that's splitting
         new_parent = MondrianNode(self.n_dims, self.n_labels, node.parent, node.budget, self._scorer)
         new_parent.min_d = np.fmin(min_d, node.min_d)
