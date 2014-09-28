@@ -94,10 +94,10 @@ def get_prior_class_probs(node, discount_param):
     Get the IKN prior for the class probabilities at this node,
     with the specified discount rate.
     """
-    if node.parent is None:
-        return normalize(np.ones_like(node.label_counts))
-    else:
+    if node.parent is not None:
         return get_posterior_class_probs(node.parent, discount_param)
+    else:
+        return normalize(np.ones_like(node.label_counts))
 
 
 def get_posterior_class_probs(node, discount_param):
@@ -158,11 +158,6 @@ def colwise_min__(data, n_rows, n_cols, res):
         res[j] = curr_min
 
 
-def calc_bbox_stats(data):
-    n_rows, n_cols = data.shape
-    # TODO
-
-
 def sample_multinomial_scores(scores):
     scores_cumsum = np.cumsum(scores)
     s = scores_cumsum[-1] * np.random.rand(1)
@@ -173,10 +168,10 @@ def sample_multinomial_scores(scores):
 @jit
 def normalize(array):
     res = np.empty_like(array)
-    if array.ndim == 1:
-        normalize_(array, res)
-    else:
+    if array.ndim > 1:
         normalize__(array, res)
+    else:
+        normalize_(array, res)
     return res
 
 
