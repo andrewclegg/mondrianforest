@@ -3,13 +3,16 @@ import os
 
 import numpy as np
 
-from collections import deque, defaultdict
+from collections import defaultdict
 
 from functools import lru_cache
 
-from numba import jit, njit
+from numba import jit, njit, b1, u4, f8, void
 
-from scipy.stats import truncexpon
+
+SKIP_DEBUG = False
+
+LRU_SIZE = 100000
 
 
 def scorer(name):
@@ -19,7 +22,7 @@ def scorer(name):
     if name == 'simple':
         scorer = SimpleScorer()
     elif name == 'nsp':
-        scorer = NSPScorerNaive()
+        scorer = ModifiedNSPScorer()
     else:
         raise ValueError('Unknown scorer ' + name)
     return scorer
@@ -80,7 +83,15 @@ def depth_first(node):
         yield node
 
 
-@lru_cache(maxsize=10000)
+def calc_posterior(counts, tables, prior, discount):
+    """
+    Calculate the posterior probability at a node, when using
+    NPS scoring.
+    """
+    return (counts - discount * tables + discount * tables.sum() * prior) / counts.sum()
+
+
+@lru_cache(maxsize=LRU_SIZE)
 def calc_discount(discount_factor, split_cost):
     """
     Calculate the discount parameter for a given split.
@@ -99,7 +110,16 @@ def calc_discount(discount_factor, split_cost):
     return np.exp(-discount_factor * split_cost)
 
 
-@lru_cache(maxsize=10000)
+@lru_cache(maxsize=LRU_SIZE)
+def _expected_discount_term1(exp_rate, discount_factor):
+    return exp_rate / (exp_rate + discount_factor)
+
+
+@lru_cache(maxsize=LRU_SIZE)
+def _expected_discount_term2(exp_rate, discount_factor, upper_bound):
+    return -np.expm1(-(exp_rate + discount_factor) * upper_bound) / -np.expm1(-exp_rate * upper_bound)
+
+
 def expected_discount(discount_factor, exp_rate, upper_bound):
     """
     Calculate the expected discount for a new instance which we want
@@ -111,17 +131,18 @@ def expected_discount(discount_factor, exp_rate, upper_bound):
     in the paper. This reflects how far outside the node's bounding
     box the new point falls. The further this is, the more likely a
     split is. The split costs described above are drawn from this
-    distribution, and also provide the upper bound (not sure I follow
-    this yet).
+    distribution, and also provide the upper bound.
     
     The discount factor is also applied as before.
+
+    Not sure I entirely follow this -- it's basically copied from
+    the reference implementation.
     """
-    func = lambda d: np.exp(-discount_factor * d)
-    trunc_exp = truncexpon(exp_rate)
-    return trunc_exp.dist.expect(func, trunc_exp.args, lb=0, ub=upper_bound)
+    return _expected_discount_term1(exp_rate, discount_factor) * \
+                _expected_discount_term2(exp_rate, discount_factor, upper_bound)
 
 
-@jit('f8[:](f8[:,:])')
+@jit(f8[:](f8[:,:]))
 def colwise_max(data):
     n_rows, n_cols = data.shape
     res = np.empty(n_cols, dtype=np.float64)
@@ -129,7 +150,7 @@ def colwise_max(data):
     return res
 
 
-@njit('void(f8[:,:],u4,u4,f8[:])')
+@njit(void(f8[:,:],u4,u4,f8[:]))
 def colwise_max__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_max = data[0, j]
@@ -139,7 +160,7 @@ def colwise_max__(data, n_rows, n_cols, res):
         res[j] = curr_max
 
 
-@jit('f8[:](f8[:,:])')
+@jit(f8[:](f8[:,:]))
 def colwise_min(data):
     n_rows, n_cols = data.shape
     res = np.empty(n_cols, dtype=np.float64)
@@ -147,7 +168,7 @@ def colwise_min(data):
     return res
 
 
-@njit('void(f8[:,:],u4,u4,f8[:])')
+@njit(void(f8[:,:],u4,u4,f8[:]))
 def colwise_min__(data, n_rows, n_cols, res):
     for j in range(n_cols):
         curr_min = data[0, j]
@@ -174,7 +195,7 @@ def normalize(array):
     return res
 
 
-@njit('void(f8[:],f8[:])')
+@njit(void(f8[:],f8[:]))
 def normalize_(vec, res):
     total = vec[0]
     length = len(vec)
@@ -184,7 +205,7 @@ def normalize_(vec, res):
         res[i] = vec[i] / total
 
 
-@njit('void(f8[:,:],f8[:,:])')
+@njit(void(f8[:,:],f8[:,:]))
 def normalize__(array, res):
     n_rows, n_cols = array.shape
     for i in range(n_rows):
@@ -195,14 +216,14 @@ def normalize__(array, res):
             res[i, j] = array[i, j] / total
 
 
-@njit('void(f8[:,:],i4,i4,f8,b1[:])')
+@njit(void(f8[:,:],u4,u4,f8,b1[:]))
 def split__(array, length, dim, threshold, res):
     for i in range(length):
         if array[i, dim] <= threshold:
             res[i] = True
 
 
-@jit('b1[:](f8[:,:],i4,f8)')
+@jit(b1[:](f8[:,:],u4,f8))
 def split(array, dim, threshold):
     length = len(array)
     res = np.zeros((length), dtype=bool)
@@ -210,7 +231,7 @@ def split(array, dim, threshold):
     return res
 
 
-@njit('f8(f8[:,:],f8[:],f8[:])')
+@njit(f8(f8[:,:],f8[:],f8[:]))
 def calc_bbox_growth(data, node_min_d, node_max_d):
     """
     Calculate the difference in linear dimension between the
@@ -275,8 +296,11 @@ class MondrianNode(object):
         self.max_d = colwise_max(data)
         self.range_d = self.max_d - self.min_d
         self.sum_range_d = np.sum(self.range_d)
-        self.label_counts += np.bincount(labels, minlength=len(self.label_counts))
-        self._scorer.on_update(self, labels)
+        # Update stored data iff this is a leaf node
+        if self.is_leaf():
+            label_counts = np.bincount(labels, minlength=len(self.label_counts))
+            self.label_counts += label_counts
+            self._scorer.on_update(self, label_counts)
         
 
     def apply_split(self, data):
@@ -291,22 +315,20 @@ class MondrianNode(object):
     
     
     def is_leaf(self):
-        if self.left is None:
-            assert self.right is None
-            return True
-        else:
-            assert self.right is not None
-            return False
+        has_left = self.left is None
+        assert SKIP_DEBUG or ((self.right is None) == has_left)
+        return has_left
 
         
     def is_pure(self):
-        return np.count_nonzero(self.label_counts) < 2
+        return self.is_leaf() and np.count_nonzero(self.label_counts) < 2
 
 
 class SimpleScorer(object):
 
 
     def __init__(self):
+##### FIXME This doesn't take into account root splits, can we make it rootless like ModifiedNSPScorer?
         self._root = None
 
 
@@ -318,7 +340,7 @@ class SimpleScorer(object):
             self._root = node
 
 
-    def on_update(self, node, labels):
+    def on_update(self, node, label_counts):
         # TODO can we do some clever caching so we do less calculation during prediction?
         pass
 
@@ -346,29 +368,42 @@ class SimpleScorer(object):
         return np.apply_along_axis(self._predict, 1, x_array)
 
 
-# TODO better names
-def calc_posterior(c, t, p, d):
-    return (c - d * t + d * t.sum() * p) / c.sum()
-
-
-class NSPScorerNaive(object):
+class ModifiedNSPScorer(object):
 
 
     DISCOUNT_FACTOR = 10 # TODO un-hard-code me
 
 
     def __init__(self):
-        self._root = None
+        self._classes = None
+        self._tables = None
+        self._counts = None
+        self._posterior_cache = None
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.cache_evictions = 0
 
 
     def _calc_prior(self, node):
-        if node == self._root:
-            return normalize(np.ones_like(node.label_counts))
-        else:
+        if node.parent:
+            # Not root
             return self._calc_posterior(node.parent)
+        else:
+            # Root
+            return normalize(np.ones_like(node.label_counts))
 
 
-    def _calc_posterior(self, node):
+    def _calc_posterior(self, node, evict=False):
+        if node in self._posterior_cache:
+            if evict:
+                self.cache_evictions += 1
+                del self._posterior_cache[node]
+            else:
+                self.cache_hits += 1
+                return self._posterior_cache[node]
+        else:
+            self.cache_misses += 1
+
         c = self._counts[node]
         t = self._tables[node]
         p = self._calc_prior(node)
@@ -379,8 +414,8 @@ class NSPScorerNaive(object):
 
         # DEBUG
         try:
-            assert (posterior >= 0).all()
-            assert np.allclose(posterior.sum(), 1)
+            assert SKIP_DEBUG or (posterior >= 0).all()
+            assert SKIP_DEBUG or np.allclose(posterior.sum(), 1)
         except:
             print('counts', c)
             print('tables', t)
@@ -389,57 +424,72 @@ class NSPScorerNaive(object):
             print('posterior', posterior)
             raise
 
+        self._posterior_cache[node] = posterior
         return posterior
 
 
-    # N.B. This is directly copied from SimpleScorer -- temporary measure
     def on_create(self, node):
 #        print('on_create fired')
-        if self._root is None:
+        if self._classes is None:
             if node.parent is not None:
                 raise ValueError('Error: called on_create with a non-root node the first time')
-            self._root = node
-            n = len(self._root.label_counts)
-            self._tables = defaultdict(lambda: np.zeros(n))
-            self._counts = defaultdict(lambda: np.zeros(n))
- #           print('initialized ok')
+            self._classes = len(node.label_counts)
+            self._tables = defaultdict(lambda: np.zeros(self._classes, dtype=bool))
+            self._counts = defaultdict(lambda: np.zeros(self._classes, dtype=np.uint8))
+            self._posterior_cache = {}
+#            print('initialized ok')
 
 
-    def on_update(self, node, labels):
-#        print('on_update fired')
-#        print(labels)
-        for label in labels:
-            self._update_counts(node, label)
-#        print(self._tables)
-#        print(self._counts)
+    def on_update(self, node, label_counts):
+        dirty_nodes = self._update_counts(node, label_counts)
+        for n in reversed(dirty_nodes):
+            self._calc_posterior(n, evict=True)
 
-
-    def _update_counts(self, node, label):
+    # TODO maybe we can do an array-based update instead of a loop
+    def _update_counts(self, node, label_counts):
+        assert SKIP_DEBUG or node.is_leaf()
+        labels_affected = label_counts > 0
+#        print("labels_affected", labels_affected)
         _t = self._tables
         _c = self._counts
+        nodes_touched = []
+        # Walk up the tree, updating all the counts where necessary
         while node != None:
-            if _t[node][label] == 1:
-                return
-            if node.is_leaf():
-                _c[node][label] = node.label_counts[label]
+            # Where the table value for a label is already 1, we can stop
+            labels_completed = labels_affected & _t[node]
+            labels_affected[labels_completed] = False
+            if np.any(labels_affected):
+                nodes_touched.append(node)
+                if node.is_leaf():
+                    # Scorer's counts for leaf nodes are just the true counts
+                    _c[node] = node.label_counts.astype(np.uint8)
+                else:
+                    # Scorer's counts for root/internal nodes are based on tables,
+                    # and internally-stored counts (this is where we deviate from paper)
+                    _c[node] = np.fmin(1, _c[node]) + _t[node.left] + _t[node.right] 
+                # Update tables, whatever kind of node it is
+                _t[node] = _c[node].astype(bool)
             else:
-                _c[node][label] = _t[node.left][label] + _t[node.right][label] + np.fmin(1, _c[node][label])
-            _t[node][label] = np.fmin(1, _c[node][label])
+                # No more labels affected, so we can stop traversing
+                break
+            assert SKIP_DEBUG or _t[node].dtype == bool
+            assert SKIP_DEBUG or _c[node].dtype == np.uint8
             node = node.parent
+        return nodes_touched
 
 
-    def _predict(self, x):
+    def _predict(self, x, tree):
         
 #        print('Predicting for one row:', x)
 
         previous_posterior = None
-        node = self._root
         p_not_separated_yet = 1
-        s = np.zeros_like(self._root.label_counts)
+        s = np.zeros(self._classes)
+        node = tree.root
 
         while True:
 
-#            if node == self._root:
+#            if node.parent is None:
 #                print('Inspecting root node')
 #            elif node.is_leaf():
 #                print('Inspecting leaf node')
@@ -488,10 +538,10 @@ class NSPScorerNaive(object):
 
                 # DEBUG
                 try:
-                    assert s.ndim == 1
-                    assert len(s) == len(self._root.label_counts)
-                    assert (s >= 0).all()
-                    assert np.allclose(s.sum(), 1)
+                    assert SKIP_DEBUG or s.ndim == 1
+                    assert SKIP_DEBUG or len(s) == self._classes
+                    assert SKIP_DEBUG or (s >= 0).all()
+                    assert SKIP_DEBUG or np.allclose(s.sum(), 1)
                 except:
                     print(s)
                     print('p_not_separated_yet', p_not_separated_yet)
@@ -512,19 +562,19 @@ class NSPScorerNaive(object):
 
                 # DEBUG
                 try:
-                    assert previous_posterior.ndim == 1
-                    assert len(previous_posterior) == len(self._root.label_counts)
-                    assert (previous_posterior >= 0).all()
-                    assert np.allclose(previous_posterior.sum(), 1)
+                    assert SKIP_DEBUG or previous_posterior.ndim == 1
+                    assert SKIP_DEBUG or len(previous_posterior) == self._classes
+                    assert SKIP_DEBUG or (previous_posterior >= 0).all()
+                    assert SKIP_DEBUG or np.allclose(previous_posterior.sum(), 1)
                 except:
                     print(previous_posterior)
                     raise
 
 
-    def predict(self, x):
+    def predict(self, x, tree):
 
         x_array = np.atleast_2d(x)
-        return np.apply_along_axis(self._predict, 1, x_array)
+        return np.apply_along_axis(self._predict, 1, x_array, tree)
 
 
 class MondrianTree(object):
@@ -591,7 +641,7 @@ class MondrianTree(object):
 
     def _split_node(self, node, data, labels, split_cost):
         
-        assert not node.is_leaf() # Mutate leaf nodes by growing, not splitting
+        assert SKIP_DEBUG or not node.is_leaf() # Mutate leaf nodes by growing, not splitting
         
         min_d = colwise_min(data)
         max_d = colwise_max(data)
@@ -617,7 +667,7 @@ class MondrianTree(object):
         else:
             split = random.uniform(node.max_d[feat_id], max_d[feat_id])
         
-        assert (split < node.min_d[feat_id]) or (split > node.max_d[feat_id])
+        assert SKIP_DEBUG or (split < node.min_d[feat_id]) or (split > node.max_d[feat_id])
         
         # Set up the new parent node to use this split
         new_parent.split_dim = feat_id
@@ -678,7 +728,7 @@ class MondrianTree(object):
 
     def _grow(self, node):
         
-        assert node.is_leaf()
+        assert SKIP_DEBUG or node.is_leaf()
         
         # Is node paused, empty or effectively empty? If so, don't split it
         if node.is_pure() or node.sum_range_d == 0:
@@ -699,7 +749,7 @@ class MondrianTree(object):
 
 
     def predict(self, x):
-        return self._scorer.predict(x)
+        return self._scorer.predict(x, self)
 
 
 class MondrianForest(object):
