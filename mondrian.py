@@ -1,5 +1,6 @@
 import random
 import os
+import time
 
 import numpy as np
 
@@ -76,7 +77,7 @@ def depth_first(node):
     """
     if node is None:
         return
-    yield node
+)    yield node
     for kid in depth_first(node.left):
         yield node
     for kid in depth_first(node.right):
@@ -115,8 +116,8 @@ def _expected_discount_term1(exp_rate, discount_factor):
     return exp_rate / (exp_rate + discount_factor)
 
 
-@lru_cache(maxsize=LRU_SIZE)
 def _expected_discount_term2(exp_rate, discount_factor, upper_bound):
+    # We don't cache this as the extra param means we get way more misses than hits
     return -np.expm1(-(exp_rate + discount_factor) * upper_bound) / -np.expm1(-exp_rate * upper_bound)
 
 
@@ -296,7 +297,7 @@ class MondrianNode(object):
         self.max_d = colwise_max(data)
         self.range_d = self.max_d - self.min_d
         self.sum_range_d = np.sum(self.range_d)
-        # Update stored data iff this is a leaf node
+        # Update label counts iff this is a leaf node
         if self.is_leaf():
             label_counts = np.bincount(labels, minlength=len(self.label_counts))
             self.label_counts += label_counts
@@ -586,7 +587,9 @@ class MondrianTree(object):
         self.starting_budget = budget
         self._scorer = scorer(scoring)
         self.root = MondrianNode(n_dims, n_labels, None, budget, self._scorer)
-        
+        np.random.seed(int(abs(time.time() + hash(self))))
+        random.seed(abs(time.time() + hash(self)))
+
     
     def extend(self, data, labels):
         self._extend_node(self.root, data, labels)
