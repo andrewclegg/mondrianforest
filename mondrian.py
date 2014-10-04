@@ -335,6 +335,15 @@ class ModifiedNSPScorer(object):
         self.cache_evictions = 0
 
 
+    def status(self):
+        return {'estimated_counts': len(self._counts),
+                'tables': len(self._tables),
+                'posterior_cache': {'size': len(self._posterior_cache),
+                                    'hits': self.cache_hits,
+                                    'misses': self.cache_misses,
+                                    'evictions': self.cache_evictions}}
+
+
     def _calc_prior(self, node):
         if node.parent:
             # Not root
@@ -600,7 +609,10 @@ class MondrianTree(object):
         z = zip(*((1, node.is_leaf(), (node.parent is None))
                 for node in depth_first(self.root)))
         counts = np.add.reduce(list(z), axis=1)
-        return {'nodes': counts[0], 'leaf_nodes': counts[1], 'root_nodes': counts[1]}
+        return {'nodes': counts[0],
+                'leaf_nodes': counts[1],
+                'root_nodes': counts[2],
+                'scorer': self._scorer.status()}
 
     
     def extend(self, data, labels):
@@ -638,6 +650,7 @@ class MondrianTree(object):
 
         if was_paused and not is_paused:
             # We've unpaused a leaf node so we need to grow the tree
+# TODO have we established for certain that we are pausing correctly?
             self._grow(node)
         elif not is_leaf:
             # Split the data into left portion and right portion, and repeat
