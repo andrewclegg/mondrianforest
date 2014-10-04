@@ -6,7 +6,7 @@ import numpy as np
 
 from collections import defaultdict
 
-from functools import lru_cache
+from functools import lru_cache, reduce
 
 from numba import jit, njit, b1, u4, f8, void
 
@@ -55,6 +55,14 @@ def predict(x, global_name):
     return preds
 
 
+def status(global_name):
+    """
+    Helper function for remote engines.
+    """
+    forest = globals()[global_name]
+    return forest.status()
+
+
 def combine_predictions(results):
     """
     Helper function for combining predictions from multiple trees.
@@ -72,15 +80,11 @@ def combine_predictions(results):
 
 def depth_first(node):
     """
-    Depth-first node iterator, not currently using this but it
-    might come in handy.
+    Depth-first node iterator.
     """
-    if node is None:
-        return
-    yield node
-    for kid in depth_first(node.left):
-        yield node
-    for kid in depth_first(node.right):
+    if node is not None:
+        yield from depth_first(node.left)
+        yield from depth_first(node.right)
         yield node
 
 
@@ -269,60 +273,6 @@ def calc_bbox_growth(data, node_min_d, node_max_d):
         total += l_extension + u_extension
         
     return total 
-
-
-class MondrianNode(object):
-
-    
-    def __init__(self, n_dims, n_labels, parent, budget, scorer):
-        self.min_d = np.empty(n_dims)
-        self.max_d = np.empty(n_dims)
-        self.range_d = np.empty(n_dims)
-        self.sum_range_d = 0
-        self.label_counts = np.zeros(n_labels)
-        self.budget = budget
-        self.max_split_cost = 0
-        self.parent = parent
-        self.left = None
-        self.right = None
-        self.split_dim = None
-        self.split_point = None
-        self._scorer = scorer
-        self._scorer.on_create(self)
-
-    
-    def update(self, data, labels):
-        # Update bounding box and label counts
-        self.min_d = colwise_min(data)
-        self.max_d = colwise_max(data)
-        self.range_d = self.max_d - self.min_d
-        self.sum_range_d = np.sum(self.range_d)
-        # Update stored counts iff this is a leaf node
-        if self.is_leaf():
-            label_counts = np.bincount(labels, minlength=len(self.label_counts))
-            self.label_counts += label_counts
-            self._scorer.on_update(self, label_counts)
-        
-
-    def apply_split(self, data):
-        # Apply this node's existing splitting criterion to some data (vector or array)
-        # and return a boolean index (True==goes left, False==goes right)
-        dim = self.split_dim
-        threshold = self.split_point
-        if data.ndim > 1:
-            return split(data, dim, threshold)
-        else:
-            return data[dim] <= threshold
-    
-    
-    def is_leaf(self):
-        has_left = self.left is None
-        assert SKIP_DEBUG or ((self.right is None) == has_left)
-        return has_left
-
-        
-    def is_pure(self):
-        return self.is_leaf() and np.count_nonzero(self.label_counts) < 2
 
 
 class SimpleScorer(object):
@@ -578,6 +528,60 @@ class ModifiedNSPScorer(object):
         return np.apply_along_axis(self._predict, 1, x_array, tree)
 
 
+class MondrianNode(object):
+
+    
+    def __init__(self, n_dims, n_labels, parent, budget, scorer):
+        self.min_d = np.empty(n_dims)
+        self.max_d = np.empty(n_dims)
+        self.range_d = np.empty(n_dims)
+        self.sum_range_d = 0
+        self.label_counts = np.zeros(n_labels)
+        self.budget = budget
+        self.max_split_cost = 0
+        self.parent = parent
+        self.left = None
+        self.right = None
+        self.split_dim = None
+        self.split_point = None
+        self._scorer = scorer
+        self._scorer.on_create(self)
+
+    
+    def update(self, data, labels):
+        # Update bounding box and label counts
+        self.min_d = colwise_min(data)
+        self.max_d = colwise_max(data)
+        self.range_d = self.max_d - self.min_d
+        self.sum_range_d = np.sum(self.range_d)
+        # Update stored counts iff this is a leaf node
+        if self.is_leaf():
+            label_counts = np.bincount(labels, minlength=len(self.label_counts))
+            self.label_counts += label_counts
+            self._scorer.on_update(self, label_counts)
+        
+
+    def apply_split(self, data):
+        # Apply this node's existing splitting criterion to some data (vector or array)
+        # and return a boolean index (True==goes left, False==goes right)
+        dim = self.split_dim
+        threshold = self.split_point
+        if data.ndim > 1:
+            return split(data, dim, threshold)
+        else:
+            return data[dim] <= threshold
+    
+    
+    def is_leaf(self):
+        has_left = self.left is None
+        assert SKIP_DEBUG or ((self.right is None) == has_left)
+        return has_left
+
+        
+    def is_pure(self):
+        return self.is_leaf() and np.count_nonzero(self.label_counts) < 2
+
+
 class MondrianTree(object):
     
     
@@ -589,6 +593,14 @@ class MondrianTree(object):
         self.root = MondrianNode(n_dims, n_labels, None, budget, self._scorer)
         np.random.seed(int(abs(time.time() + hash(self))))
         random.seed(abs(time.time() + hash(self)))
+
+
+    def status(self):
+        # TODO keep track of the node counts somewhere?
+        z = zip(*((1, node.is_leaf(), (node.parent is None))
+                for node in depth_first(self.root)))
+        counts = np.add.reduce(list(z), axis=1)
+        return {'nodes': counts[0], 'leaf_nodes': counts[1], 'root_nodes': counts[1]}
 
     
     def extend(self, data, labels):
@@ -777,6 +789,12 @@ class MondrianForest(object):
         return combine_predictions(results) if aggregate else results
 
 
+    def status(self):
+        return {'trees': [tree.status() for tree in self._trees],
+                'worker': {'calc_discount': calc_discount.cache_info(),
+                           '_expected_discount_term1': _expected_discount_term1.cache_info()}}
+
+
 class ParallelMondrianForest(object):
 
 
@@ -805,4 +823,7 @@ class ParallelMondrianForest(object):
         else:
             return flattened
 
+
+    def status(self):
+        return [status for status in self._view.apply_sync(status, self._remote_name)]
 
