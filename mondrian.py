@@ -77,7 +77,7 @@ def depth_first(node):
     """
     if node is None:
         return
-)    yield node
+    yield node
     for kid in depth_first(node.left):
         yield node
     for kid in depth_first(node.right):
@@ -297,7 +297,7 @@ class MondrianNode(object):
         self.max_d = colwise_max(data)
         self.range_d = self.max_d - self.min_d
         self.sum_range_d = np.sum(self.range_d)
-        # Update label counts iff this is a leaf node
+        # Update stored counts iff this is a leaf node
         if self.is_leaf():
             label_counts = np.bincount(labels, minlength=len(self.label_counts))
             self.label_counts += label_counts
