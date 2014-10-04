@@ -59,7 +59,7 @@ def combine_predictions(results):
     """
     Helper function for combining predictions from multiple trees.
 
-    The results param is a list of numpy arrays, one from each tree.
+    The results param is usually a list of numpy arrays, one from each tree.
     Each one must have one row per instance under test, and one column per class.
     Each cell is the probability of that instance belonging to that class.
 
@@ -759,16 +759,21 @@ class MondrianForest(object):
 
     
     def __init__(self, n_trees, n_dims, n_labels, budget, scoring):
-        self.trees = [MondrianTree(n_dims, n_labels, budget, scoring) for k in range(n_trees)]
+        self._trees = [MondrianTree(n_dims, n_labels, budget, scoring) for k in range(n_trees)]
+        self._n_labels = n_labels
     
 
     def update(self, data, labels):
-        for tree in self.trees:
+        for tree in self._trees:
             tree.extend(data, labels)
 
 
     def predict(self, x, aggregate=True):
-        results = [tree.predict(x) for tree in self.trees]
+        results = [tree.predict(x) for tree in self._trees]
+        assert SKIP_DEBUG or len(results) == len(self._trees)
+        if aggregate:
+            combined = combine_predictions(results)
+            assert SKIP_DEBUG or combined.shape == (len(x), self._n_labels)
         return combine_predictions(results) if aggregate else results
 
 
@@ -777,6 +782,8 @@ class ParallelMondrianForest(object):
 
     def __init__(self, ipy_view, trees_per_worker, n_dims, n_labels, budget, scoring):
         self._view = ipy_view
+        self._total_trees = len(ipy_view) * trees_per_worker
+        self._n_labels = n_labels
         self._remote_name = 'mondrian_worker'
         self._view.apply_sync(init_forest, trees_per_worker, n_dims, n_labels,
                               budget, scoring, os.path.realpath(__file__), self._remote_name)
@@ -788,6 +795,14 @@ class ParallelMondrianForest(object):
 
     def predict(self, x, aggregate=True):
         results = self._view.apply_sync(predict, x, self._remote_name)
-        return combine_predictions(np.vstack(results)) if aggregate else results
+        assert SKIP_DEBUG or len(results) == len(self._view)
+        flattened = [preds for result in results for preds in result]
+        assert SKIP_DEBUG or len(flattened) == self._total_trees
+        if aggregate:
+            combined = combine_predictions(flattened)
+            assert SKIP_DEBUG or combined.shape == (len(x), self._n_labels)
+            return combined
+        else:
+            return flattened
 
 
