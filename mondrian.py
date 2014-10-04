@@ -788,6 +788,6 @@ class ParallelMondrianForest(object):
 
     def predict(self, x, aggregate=True):
         results = self._view.apply_sync(predict, x, self._remote_name)
-        return combine_predictions(results) if aggregate else results
+        return combine_predictions(np.vstack(results)) if aggregate else results
 
 
