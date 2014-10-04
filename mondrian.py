@@ -29,30 +29,30 @@ def scorer(name):
     return scorer
 
 
-def init_tree(n_dims, n_labels, budget, scoring, lib_path, global_name):
+def init_forest(n_trees, n_dims, n_labels, budget, scoring, lib_path, global_name):
     """
     Helper function for remote engines.
     """
     import importlib.machinery
     loader = importlib.machinery.SourceFileLoader('mondrian', lib_path)
     mondrian = loader.load_module()
-    globals()[global_name] = mondrian.MondrianTree(n_dims, n_labels, budget, scoring)
+    globals()[global_name] = mondrian.MondrianForest(n_trees, n_dims, n_labels, budget, scoring)
 
 
-def extend(data, labels, global_name):
+def update(data, labels, global_name):
     """
     Helper function for remote engines.
     """
-    globals()[global_name].extend(data, labels)
+    globals()[global_name].update(data, labels)
 
 
 def predict(x, global_name):
     """
     Helper function for remote engines.
     """
-    tree = globals()[global_name]
-    pred = tree.predict(x)
-    return pred
+    forest = globals()[global_name]
+    preds = forest.predict(x, aggregate=False)
+    return preds
 
 
 def combine_predictions(results):
@@ -767,25 +767,27 @@ class MondrianForest(object):
             tree.extend(data, labels)
 
 
-    def predict(self, x):
+    def predict(self, x, aggregate=True):
         results = [tree.predict(x) for tree in self.trees]
-        return combine_predictions(results)
+        return combine_predictions(results) if aggregate else results
 
 
 class ParallelMondrianForest(object):
 
 
-    def __init__(self, ipy_view, n_dims, n_labels, budget, scoring):
+    def __init__(self, ipy_view, trees_per_worker, n_dims, n_labels, budget, scoring):
         self._view = ipy_view
         self._remote_name = 'mondrian_worker'
-        self._view.apply_sync(init_tree, n_dims, n_labels, budget, scoring, os.path.realpath(__file__), self._remote_name)
+        self._view.apply_sync(init_forest, trees_per_worker, n_dims, n_labels,
+                              budget, scoring, os.path.realpath(__file__), self._remote_name)
 
 
     def update(self, data, labels):
-        self._view.apply_sync(extend, data, labels, self._remote_name)
+        self._view.apply_sync(update, data, labels, self._remote_name)
 
 
-    def predict(self, x):
+    def predict(self, x, aggregate=True):
         results = self._view.apply_sync(predict, x, self._remote_name)
-        return combine_predictions(results)
+        return combine_predictions(results) if aggregate else results
+
 
