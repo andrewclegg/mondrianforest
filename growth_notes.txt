@@ -1,0 +1,148 @@
+500 iterations * 1 tree
+
+Budget = 1000
+
+363.749 seconds
+
+Overall accuracy: 0.6138
+
+ {'trees': [{'leaf_nodes': 91693,
+            'nodes': 183385,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 139045,
+                       'nodes_with_tables': 146516,
+                       'posterior_cache': {'evictions': 66195,
+                                           'hits': 428187,
+                                           'misses': 149333,
+                                           'size': 138400}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=54930, misses=1968, maxsize=100000, currsize=1968),
+            'calc_discount': CacheInfo(hits=138529, misses=66066, maxsize=100000, currsize=66066)}}
+
+
+500 iterations * 1 tree
+
+Budget = 10
+
+351.191 seconds
+
+Overall accuracy: 0.6198
+
+ {'trees': [{'leaf_nodes': 86048,
+            'nodes': 172095,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 130548,
+                       'nodes_with_tables': 136943,
+                       'posterior_cache': {'evictions': 58495,
+                                           'hits': 385870,
+                                           'misses': 138733,
+                                           'size': 129884}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=55687, misses=2160, maxsize=100000, currsize=2160),
+            'calc_discount': CacheInfo(hits=128243, misses=60136, maxsize=100000, currsize=60136)}}
+
+
+500 iterations * 1 tree
+
+Budget = 1
+
+358.125 seconds
+
+Overall accuracy: 0.615
+
+ {'trees': [{'leaf_nodes': 82981,
+            'nodes': 165961,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 126131,
+                       'nodes_with_tables': 132466,
+                       'posterior_cache': {'evictions': 59137,
+                                           'hits': 398000,
+                                           'misses': 133533,
+                                           'size': 125511}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=50995, misses=2102, maxsize=100000, currsize=2102),
+            'calc_discount': CacheInfo(hits=125158, misses=59490, maxsize=100000, currsize=59490)}}
+
+
+500 iterations * 1 tree
+
+Budget = 0.1
+
+333.186 seconds
+
+Overall accuracy: 0.6054
+
+ {'trees': [{'leaf_nodes': 92761,
+            'nodes': 185521,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 138119,
+                       'nodes_with_tables': 145682,
+                       'posterior_cache': {'evictions': 63583,
+                                           'hits': 398029,
+                                           'misses': 148926,
+                                           'size': 137463}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=47157, misses=2119, maxsize=100000, currsize=2119),
+            'calc_discount': CacheInfo(hits=137316, misses=63730, maxsize=100000, currsize=63730)}}
+
+
+500 iterations * 1 tree
+
+Budget = 0.01
+
+382.880 seconds
+
+Overall accuracy: 0.6162
+
+ {'trees': [{'leaf_nodes': 92756,
+            'nodes': 185511,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 140769,
+                       'nodes_with_tables': 148126,
+                       'posterior_cache': {'evictions': 66491,
+                                           'hits': 404704,
+                                           'misses': 151113,
+                                           'size': 140162}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=53523, misses=2050, maxsize=100000, currsize=2050),
+            'calc_discount': CacheInfo(hits=140130, misses=66523, maxsize=100000, currsize=66523)}}
+
+
+
+500 iterations * 1 tree
+
+Budget = 0.001
+
+298.894 seconds
+
+Overall accuracy: 0.5986
+
+ {'trees': [{'leaf_nodes': 39194,
+            'nodes': 78387,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 65607,
+                       'nodes_with_tables': 67498,
+                       'posterior_cache': {'evictions': 38587,
+                                           'hits': 320950,
+                                           'misses': 75099,
+                                           'size': 65294}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=50247, misses=2061, maxsize=100000, currsize=2061),
+            'calc_discount': CacheInfo(hits=70198, misses=33683, maxsize=100000, currsize=33683)}}
+
+
+500 iterations * 1 tree
+
+Budget = 0.0001
+
+87.810 seconds
+
+Overall accuracy: 0.5078
+
+ {'trees': [{'leaf_nodes': 98,
+            'nodes': 195,
+            'root_nodes': 1,
+            'scorer': {'nodes_with_estimated_counts': 187,
+                       'nodes_with_tables': 187,
+                       'posterior_cache': {'evictions': 103,
+                                           'hits': 37442,
+                                           'misses': 570,
+                                           'size': 187}}}],
+ 'worker': {'_expected_discount_term1': CacheInfo(hits=1960, misses=357, maxsize=100000, currsize=357),
+            'calc_discount': CacheInfo(hits=183, misses=107, maxsize=100000, currsize=107)}}
+
+

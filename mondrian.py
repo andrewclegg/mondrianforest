@@ -336,8 +336,8 @@ class ModifiedNSPScorer(object):
 
 
     def status(self):
-        return {'estimated_counts': len(self._counts),
-                'tables': len(self._tables),
+        return {'nodes_with_estimated_counts': len(self._counts),
+                'nodes_with_tables': len(self._tables),
                 'posterior_cache': {'size': len(self._posterior_cache),
                                     'hits': self.cache_hits,
                                     'misses': self.cache_misses,
@@ -405,7 +405,7 @@ class ModifiedNSPScorer(object):
         for n in reversed(dirty_nodes):
             self._calc_posterior(n, evict=True)
 
-    # TODO maybe we can do an array-based update instead of a loop
+
     def _update_counts(self, node, label_counts):
         assert SKIP_DEBUG or node.is_leaf()
         labels_affected = label_counts > 0
@@ -631,7 +631,7 @@ class MondrianTree(object):
         is_leaf = node.is_leaf()
         if expo_parameter == 0 or is_leaf:
             # Don't split if (a) none of the new data is outside the existing bounding box,
-            # or (b) it's a leaf node (we don't split these, we grow them)
+            # or (b) it's a leaf node (we don't split these, we grow them - TODO check that's right)
             split_cost = np.inf
         else:
             # The bigger the new bounding box relative to the old one, the more likely we are to split the node
@@ -642,7 +642,7 @@ class MondrianTree(object):
             self._split_node(node, data, labels, split_cost)
             return
 
-        # Otherwise carry on updating the existing tree structure
+        # Otherwise carry on feeding the new data into the existing tree structure
         
         was_paused = is_leaf and node.is_pure()
         node.update(data, labels)
